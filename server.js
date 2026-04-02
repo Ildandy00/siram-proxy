@@ -18,6 +18,7 @@ const SH = {
   CATALOGO:   'CatalogoAttivita',
   INTERVENTI: 'Interventi',
   CHECKLIST:  'ChecklistEsecuzione',
+  ASSENZE:    'Assenze',
 };
 
 // ============================================================
@@ -251,6 +252,242 @@ app.post('/aggiungi-extra', async (req, res) => {
     res.status(500).json({ ok: false, errore: err.message });
   }
 });
+
+
+// ============================================================
+//  GET /dati-responsabile — dati completi per la vista desktop
+//  Include impianti, interventi, checklist, assenze, catalogo
+// ============================================================
+app.get('/dati-responsabile', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const [rImp, rCat, rInt, rChk, rAss] = await Promise.all([
+      leggi(sheets, SH.IMPIANTI),
+      leggi(sheets, SH.CATALOGO),
+      leggi(sheets, SH.INTERVENTI),
+      leggi(sheets, SH.CHECKLIST),
+      leggi(sheets, SH.ASSENZE).catch(() => [[]]),
+    ]);
+
+    const impianti = rImp.slice(1).filter(r => r[0]).map(r => ({
+      codice: r[0]||'', descrizione: r[1]||'', comune: r[2]||'',
+      indirizzo: r[3]||'', operaioDefault: r[4]||'',
+    }));
+    const catalogo = rCat.slice(1).filter(r => r[0]).map(r => ({
+      codiceImpianto: r[0]||'', tipoVisita: r[1]||'',
+      attivita: r[2]||'', ordine: Number(r[3])||0, obbligatoria: r[4]||'SI',
+    }));
+    const interventi = rInt.slice(1).filter(r => r[0]).map(r => ({
+      id: r[0]||'', codiceImpianto: r[1]||'', dataPrevista: fmtData(r[2]),
+      operaio: r[3]||'', tipoVisita: r[4]||'', stato: r[5]||'',
+      note: r[6]||'', dataChiusura: fmtData(r[7]), creatoIl: fmtData(r[8]),
+    }));
+    const checklist = rChk.slice(1).filter(r => r[0]).map(r => ({
+      id: r[0]||'', idIntervento: r[1]||'', attivita: r[2]||'',
+      eseguita: r[3]||'NO', oraCompletamento: fmtDateTime(r[4]),
+      note: r[5]||'', extra: r[6]||'NO',
+    }));
+    const assenze = rAss.slice(1).filter(r => r[0]).map(r => ({
+      id: r[0]||'', operaio: r[1]||'', dataInizio: fmtData(r[2]),
+      dataFine: fmtData(r[3]), tipo: r[4]||'', note: r[5]||'',
+    }));
+
+    res.json({ impianti, catalogo, interventi, checklist, assenze });
+  } catch (err) {
+    console.error('GET /dati-responsabile error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  POST /crea-intervento
+//  Body: { codiceImpianto, dataPrevista, operaio, tipoVisita, note, attivitaExtra[] }
+// ============================================================
+app.post('/crea-intervento', async (req, res) => {
+  try {
+    const { codiceImpianto, dataPrevista, operaio, tipoVisita, note, attivitaExtra } = req.body;
+    const sheets = await getSheets();
+
+    const id    = 'INT-' + Math.random().toString(36).substring(2, 10).toUpperCase();
+    const oggi  = new Date().toLocaleDateString('it-IT');
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: SH.INTERVENTI,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [[id, codiceImpianto, dataPrevista, operaio, tipoVisita, 'Aperto', note||'', '', oggi]] },
+    });
+
+    // Genera checklist dal catalogo
+    const rCat = await leggi(sheets, SH.CATALOGO);
+    const voci = rCat.slice(1)
+      .filter(r => r[0] === codiceImpianto && r[1] === tipoVisita)
+      .sort((a,b) => (Number(a[3])||0) - (Number(b[3])||0));
+
+    const chkRows = voci.map(r => {
+      const chkId = 'CHK-' + Math.random().toString(36).substring(2, 10).toUpperCase();
+      return [chkId, id, r[2]||'', 'NO', '', '', 'NO'];
+    });
+
+    if (attivitaExtra && attivitaExtra.length > 0) {
+      attivitaExtra.forEach(att => {
+        const chkId = 'CHK-' + Math.random().toString(36).substring(2, 10).toUpperCase();
+        chkRows.push([chkId, id, att, 'NO', '', '', 'SI']);
+      });
+    }
+
+    if (chkRows.length > 0) {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SHEET_ID,
+        range: SH.CHECKLIST,
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: chkRows },
+      });
+    }
+
+    res.json({ ok: true, id });
+  } catch (err) {
+    console.error('POST /crea-intervento error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  POST /elimina-intervento
+//  Body: { id }
+// ============================================================
+app.post('/elimina-intervento', async (req, res) => {
+  try {
+    const { id } = req.body;
+    const sheets = await getSheets();
+
+    // Elimina checklist collegata
+    const rChk = await leggi(sheets, SH.CHECKLIST);
+    const chkIdxs = rChk.map((r,i) => i).filter(i => i > 0 && rChk[i][1] === id).reverse();
+    for (const idx of chkIdxs) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: { requests: [{ deleteDimension: {
+          range: { sheetId: await getSheetId(sheets, SH.CHECKLIST), dimension: 'ROWS', startIndex: idx, endIndex: idx+1 }
+        }}]},
+      });
+    }
+
+    // Elimina intervento
+    const rInt = await leggi(sheets, SH.INTERVENTI);
+    const intIdx = rInt.findIndex((r,i) => i > 0 && r[0] === id);
+    if (intIdx > 0) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: { requests: [{ deleteDimension: {
+          range: { sheetId: await getSheetId(sheets, SH.INTERVENTI), dimension: 'ROWS', startIndex: intIdx, endIndex: intIdx+1 }
+        }}]},
+      });
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /elimina-intervento error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  POST /crea-assenza
+//  Body: { operaio, dataInizio, dataFine, tipo, note }
+// ============================================================
+app.post('/crea-assenza', async (req, res) => {
+  try {
+    const { operaio, dataInizio, dataFine, tipo, note } = req.body;
+    const sheets = await getSheets();
+    const id = 'ASS-' + Math.random().toString(36).substring(2, 10).toUpperCase();
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: SH.ASSENZE,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [[id, operaio, dataInizio, dataFine, tipo, note||'']] },
+    });
+
+    res.json({ ok: true, id });
+  } catch (err) {
+    console.error('POST /crea-assenza error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  POST /elimina-assenza
+//  Body: { id }
+// ============================================================
+app.post('/elimina-assenza', async (req, res) => {
+  try {
+    const { id } = req.body;
+    const sheets = await getSheets();
+    const rAss = await leggi(sheets, SH.ASSENZE);
+    const idx = rAss.findIndex((r,i) => i > 0 && r[0] === id);
+    if (idx > 0) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: { requests: [{ deleteDimension: {
+          range: { sheetId: await getSheetId(sheets, SH.ASSENZE), dimension: 'ROWS', startIndex: idx, endIndex: idx+1 }
+        }}]},
+      });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /elimina-assenza error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  POST /salva-catalogo
+// ============================================================
+app.post('/salva-catalogo', async (req, res) => {
+  try {
+    const { codiceImpianto, tipoVisita, attivita, ordine, obbligatoria } = req.body;
+    const sheets = await getSheets();
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID, range: SH.CATALOGO,
+      valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [[codiceImpianto, tipoVisita, attivita, ordine||1, obbligatoria||'SI']] },
+    });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// ============================================================
+//  POST /elimina-catalogo
+// ============================================================
+app.post('/elimina-catalogo', async (req, res) => {
+  try {
+    const { codice, tipoVisita, attivita } = req.body;
+    const sheets = await getSheets();
+    const rows = await leggi(sheets, SH.CATALOGO);
+    const idx = rows.findIndex((r,i) => i > 0 && r[0]===codice && r[1]===tipoVisita && r[2]===attivita);
+    if (idx > 0) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: { requests: [{ deleteDimension: {
+          range: { sheetId: await getSheetId(sheets, SH.CATALOGO), dimension:'ROWS', startIndex:idx, endIndex:idx+1 }
+        }}]},
+      });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// Helper — ottieni sheetId numerico dal nome foglio
+async function getSheetId(sheets, name) {
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+  const sheet = meta.data.sheets.find(s => s.properties.title === name);
+  if (!sheet) throw new Error('Foglio non trovato: ' + name);
+  return sheet.properties.sheetId;
+}
 
 // ============================================================
 //  START
