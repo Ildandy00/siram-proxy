@@ -196,16 +196,17 @@ app.get('/dati', async (req, res) => {
     }));
 
     const interventi = rInt.slice(1).filter(r => r[0]).map(r => ({
-      id:              r[0] || '',
-      codiceImpianto:  r[1] || '',
-      dataPrevista:    fmtData(r[2]),
-      operaio:         r[3] || '',
-      tipoVisita:      r[4] || '',
-      stato:           r[5] || '',
-      note:            r[6] || '',
-      dataChiusura:    fmtData(r[7]),
-      creatoIl:        fmtData(r[8]),
-      secondoOperaio:  r[9] || '',
+      id:                  r[0] || '',
+      codiceImpianto:      r[1] || '',
+      dataPrevista:        fmtData(r[2]),
+      operaio:             r[3] || '',
+      tipoVisita:          r[4] || '',
+      stato:               r[5] || '',
+      note:                r[6] || '',
+      dataChiusura:        fmtData(r[7]),
+      creatoIl:            fmtData(r[8]),
+      secondoOperaio:      r[9] || '',
+      interventoCollegato: r[10] || '',
     }));
 
     const checklist = rChk.slice(1).filter(r => r[0]).map(r => ({
@@ -284,28 +285,42 @@ app.post('/aggiorna-intervento', async (req, res) => {
     const { id, stato } = req.body;
     const sheets = await getSheets();
     const rows   = await leggi(sheets, SH.INTERVENTI);
+    const ora    = stato === 'Chiuso'
+      ? new Date().toLocaleString('it-IT', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' })
+      : '';
 
-    const idx = rows.findIndex((r, i) => i > 0 && r[0] === id);
-    if (idx === -1) return res.json({ ok: false, errore: 'Intervento non trovato' });
-
-    const rowNum = idx + 1;
-
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID,
-      range: `${SH.INTERVENTI}!F${rowNum}`,
-      valueInputOption: 'RAW',
-      requestBody: { values: [[stato]] },
-    });
-
-    if (stato === 'Chiuso') {
-      const ora = new Date().toLocaleString('it-IT', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' });
+    // Helper: aggiorna stato (e data chiusura) di una singola riga
+    async function aggiornaRiga(rigaId) {
+      const i = rows.findIndex((r, idx) => idx > 0 && r[0] === rigaId);
+      if (i < 1) return;
       await sheets.spreadsheets.values.update({
         spreadsheetId: SHEET_ID,
-        range: `${SH.INTERVENTI}!H${rowNum}`,
+        range: `${SH.INTERVENTI}!F${i+1}`,
         valueInputOption: 'RAW',
-        requestBody: { values: [[ora]] },
+        requestBody: { values: [[stato]] },
       });
+      if (stato === 'Chiuso') {
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: SHEET_ID,
+          range: `${SH.INTERVENTI}!H${i+1}`,
+          valueInputOption: 'RAW',
+          requestBody: { values: [[ora]] },
+        });
+      }
     }
+
+    // Aggiorna l'intervento principale
+    await aggiornaRiga(id);
+
+    // Aggiorna l'eventuale intervento collegato (colonna K)
+    const mainRow = rows.find((r, idx) => idx > 0 && r[0] === id);
+    const collegato = mainRow && mainRow[10] ? mainRow[10] : null;
+    if (collegato) await aggiornaRiga(collegato);
+
+    // Se non è nella colonna K, cerca anche in direzione inversa
+    // (intervento che ha questo id come collegato)
+    const inverso = rows.find((r, idx) => idx > 0 && r[10] === id);
+    if (inverso && inverso[0] !== id) await aggiornaRiga(inverso[0]);
 
     res.json({ ok: true });
   } catch (err) {
@@ -368,7 +383,7 @@ app.get('/dati-responsabile', async (req, res) => {
       id: r[0]||'', codiceImpianto: r[1]||'', dataPrevista: fmtData(r[2]),
       operaio: r[3]||'', tipoVisita: r[4]||'', stato: r[5]||'',
       note: r[6]||'', dataChiusura: fmtData(r[7]), creatoIl: fmtData(r[8]),
-      secondoOperaio: r[9]||'',
+      secondoOperaio: r[9]||'', interventoCollegato: r[10]||'',
     }));
     const checklist = rChk.slice(1).filter(r => r[0]).map(r => ({
       id: r[0]||'', idIntervento: r[1]||'', attivita: r[2]||'',
@@ -404,7 +419,11 @@ app.post('/crea-intervento', async (req, res) => {
       range: SH.INTERVENTI,
       valueInputOption: 'RAW',
       insertDataOption: 'INSERT_ROWS',
-      requestBody: { values: [[id, codiceImpianto, dataPrevista, operaio, tipoVisita, 'Aperto', note||'', '', oggi]] },
+      requestBody: { values: [[
+        id, codiceImpianto, dataPrevista, operaio, tipoVisita,
+        'Aperto', note||'', '', oggi, '', // col J: secondoOperaio vuoto
+        req.body.interventoCollegato || '' // col K: collegamento
+      ]] },
     });
 
     // Genera checklist dal catalogo
@@ -538,6 +557,30 @@ app.post('/elimina-assenza', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('POST /elimina-assenza error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  POST /imposta-collegamento
+//  Body: { id, interventoCollegato }
+// ============================================================
+app.post('/imposta-collegamento', async (req, res) => {
+  try {
+    const { id, interventoCollegato } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.INTERVENTI);
+    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
+    if (idx < 1) return res.json({ ok: false });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `${SH.INTERVENTI}!K${idx+1}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [[interventoCollegato]] },
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /imposta-collegamento error:', err.message);
     res.status(500).json({ ok: false, errore: err.message });
   }
 });
