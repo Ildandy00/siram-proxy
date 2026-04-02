@@ -14,16 +14,59 @@ const PORT = process.env.PORT || 3000;
 const SHEET_ID = process.env.SHEET_ID || '1JsQz8FiUMFGjFQ5tuodgjexxe1hE8UE87ORFDi_geWE';
 
 const SH = {
-  IMPIANTI:   'Impianti',
-  CATALOGO:   'CatalogoAttivita',
-  INTERVENTI: 'Interventi',
-  CHECKLIST:  'ChecklistEsecuzione',
-  ASSENZE:    'Assenze',
+  IMPIANTI:    'Impianti',
+  CATALOGO:    'CatalogoAttivita',
+  INTERVENTI:  'Interventi',
+  CHECKLIST:   'ChecklistEsecuzione',
+  ASSENZE:     'Assenze',
+  PUSHTOKENS:  'PushTokens',
 };
 
 // ============================================================
-//  AUTH Google Sheets
+//  WEB PUSH
+//  Su Render imposta anche:
+//  VAPID_PUBLIC_KEY  → chiave pubblica VAPID
+//  VAPID_PRIVATE_KEY → chiave privata VAPID
+//  VAPID_EMAIL       → mailto:tua@email.com
+//  Per generare le chiavi: node -e "require('web-push').generateVAPIDKeys()"
 // ============================================================
+const webpush = require('web-push');
+
+if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(
+    process.env.VAPID_EMAIL || 'mailto:admin@siram.it',
+    process.env.VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY
+  );
+}
+
+const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY || '';
+
+// Manda notifica push a una lista di operai
+async function pushNotifica(sheets, operai, titolo, corpo) {
+  if (!process.env.VAPID_PUBLIC_KEY) return; // skip se non configurato
+  try {
+    const rows = await leggi(sheets, SH.PUSHTOKENS).catch(() => []);
+    const targets = rows.slice(1).filter(r => r[0] && operai.includes(r[0]));
+    for (const row of targets) {
+      try {
+        const sub = JSON.parse(row[1]);
+        await webpush.sendNotification(sub, JSON.stringify({
+          title: titolo,
+          body:  corpo,
+          icon:  '/icon.svg',
+        }));
+      } catch(e) {
+        // Token scaduto — rimuovi (silent)
+        console.warn('Push fallita per', row[0], e.statusCode);
+      }
+    }
+  } catch(e) {
+    console.warn('pushNotifica error:', e.message);
+  }
+}
+
+
 function getAuth() {
   const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
   return new google.auth.GoogleAuth({
@@ -78,6 +121,49 @@ function fmtDateTime(val) {
     return d.toLocaleString('it-IT', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' });
   } catch(e) { return ''; }
 }
+
+// ============================================================
+//  GET /vapid-public — restituisce la chiave pubblica VAPID
+// ============================================================
+app.get('/vapid-public', (req, res) => {
+  res.json({ key: VAPID_PUBLIC });
+});
+
+// ============================================================
+//  POST /registra-push
+//  Body: { operaio, subscription }
+// ============================================================
+app.post('/registra-push', async (req, res) => {
+  try {
+    const { operaio, subscription } = req.body;
+    if (!operaio || !subscription) return res.json({ ok: false });
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.PUSHTOKENS).catch(() => []);
+
+    // Cerca se esiste già una riga per questo operaio e aggiornala
+    const idx = rows.findIndex((r,i) => i > 0 && r[0] === operaio);
+    if (idx > 0) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: `${SH.PUSHTOKENS}!A${idx+1}:B${idx+1}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[operaio, JSON.stringify(subscription)]] },
+      });
+    } else {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SHEET_ID,
+        range: SH.PUSHTOKENS,
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: [[operaio, JSON.stringify(subscription)]] },
+      });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /registra-push error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
 
 // ============================================================
 //  GET /dati — tutti i dati per l'operaio
@@ -349,6 +435,16 @@ app.post('/crea-intervento', async (req, res) => {
       });
     }
 
+    // Notifica push all'operaio assegnato
+    const rImp = await leggi(sheets, SH.IMPIANTI);
+    const impRow = rImp.slice(1).find(r => r[0] === codiceImpianto);
+    const nomeImp = impRow ? impRow[1] : codiceImpianto;
+    const dataFmt = new Date(dataPrevista+'T00:00:00').toLocaleDateString('it-IT',{weekday:'short',day:'numeric',month:'short'});
+    await pushNotifica(sheets, [operaio],
+      '📋 Nuovo intervento assegnato',
+      `${nomeImp} — ${tipoVisita} · ${dataFmt}`
+    );
+
     res.json({ ok: true, id });
   } catch (err) {
     console.error('POST /crea-intervento error:', err.message);
@@ -457,12 +553,30 @@ app.post('/segnala-secondo', async (req, res) => {
     const rows   = await leggi(sheets, SH.INTERVENTI);
     const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
     if (idx < 1) return res.json({ ok: false, errore: 'Intervento non trovato' });
+
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
       range: `${SH.INTERVENTI}!J${idx+1}`,
       valueInputOption: 'RAW',
       requestBody: { values: [[secondoOperaio]] },
     });
+
+    // Notifica push al secondo operaio (se stiamo assegnando, non rimuovendo)
+    if (secondoOperaio) {
+      const row     = rows[idx];
+      const codice  = row[1] || '';
+      const data    = row[2] || '';
+      const primario = row[3] || '';
+      const rImp    = await leggi(sheets, SH.IMPIANTI);
+      const impRow  = rImp.slice(1).find(r => r[0] === codice);
+      const nomeImp = impRow ? impRow[1] : codice;
+      const dataFmt = data ? new Date(data+'T00:00:00').toLocaleDateString('it-IT',{weekday:'short',day:'numeric',month:'short'}) : '';
+      await pushNotifica(sheets, [secondoOperaio],
+        '👥 Richiesto il tuo supporto',
+        `${nomeImp} · ${dataFmt} — insieme a ${primario}`
+      );
+    }
+
     res.json({ ok: true });
   } catch (err) {
     console.error('POST /segnala-secondo error:', err.message);
