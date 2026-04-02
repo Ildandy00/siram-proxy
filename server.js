@@ -110,15 +110,16 @@ app.get('/dati', async (req, res) => {
     }));
 
     const interventi = rInt.slice(1).filter(r => r[0]).map(r => ({
-      id:             r[0] || '',
-      codiceImpianto: r[1] || '',
-      dataPrevista:   fmtData(r[2]),
-      operaio:        r[3] || '',
-      tipoVisita:     r[4] || '',
-      stato:          r[5] || '',
-      note:           r[6] || '',
-      dataChiusura:   fmtData(r[7]),
-      creatoIl:       fmtData(r[8]),
+      id:              r[0] || '',
+      codiceImpianto:  r[1] || '',
+      dataPrevista:    fmtData(r[2]),
+      operaio:         r[3] || '',
+      tipoVisita:      r[4] || '',
+      stato:           r[5] || '',
+      note:            r[6] || '',
+      dataChiusura:    fmtData(r[7]),
+      creatoIl:        fmtData(r[8]),
+      secondoOperaio:  r[9] || '',
     }));
 
     const checklist = rChk.slice(1).filter(r => r[0]).map(r => ({
@@ -281,6 +282,7 @@ app.get('/dati-responsabile', async (req, res) => {
       id: r[0]||'', codiceImpianto: r[1]||'', dataPrevista: fmtData(r[2]),
       operaio: r[3]||'', tipoVisita: r[4]||'', stato: r[5]||'',
       note: r[6]||'', dataChiusura: fmtData(r[7]), creatoIl: fmtData(r[8]),
+      secondoOperaio: r[9]||'',
     }));
     const checklist = rChk.slice(1).filter(r => r[0]).map(r => ({
       id: r[0]||'', idIntervento: r[1]||'', attivita: r[2]||'',
@@ -440,6 +442,54 @@ app.post('/elimina-assenza', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('POST /elimina-assenza error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  POST /segnala-secondo
+//  Body: { id, secondoOperaio }  — secondoOperaio='' per rimuovere
+// ============================================================
+app.post('/segnala-secondo', async (req, res) => {
+  try {
+    const { id, secondoOperaio } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.INTERVENTI);
+    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
+    if (idx < 1) return res.json({ ok: false, errore: 'Intervento non trovato' });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `${SH.INTERVENTI}!J${idx+1}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [[secondoOperaio]] },
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /segnala-secondo error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  POST /posticipa-intervento
+//  Body: { id, nuovaData }
+// ============================================================
+app.post('/posticipa-intervento', async (req, res) => {
+  try {
+    const { id, nuovaData } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.INTERVENTI);
+    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
+    if (idx < 1) return res.json({ ok: false, errore: 'Intervento non trovato' });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `${SH.INTERVENTI}!C${idx+1}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [[nuovaData]] },
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /posticipa-intervento error:', err.message);
     res.status(500).json({ ok: false, errore: err.message });
   }
 });
