@@ -409,6 +409,7 @@ app.get('/dati-responsabile', async (req, res) => {
 app.post('/crea-intervento', async (req, res) => {
   try {
     const { codiceImpianto, dataPrevista, operaio, tipoVisita, note, attivitaExtra } = req.body;
+    const statoIniziale = req.body.statoOverride || 'Aperto';
     const sheets = await getSheets();
 
     const id    = 'INT-' + Math.random().toString(36).substring(2, 10).toUpperCase();
@@ -421,8 +422,8 @@ app.post('/crea-intervento', async (req, res) => {
       insertDataOption: 'INSERT_ROWS',
       requestBody: { values: [[
         id, codiceImpianto, dataPrevista, operaio, tipoVisita,
-        'Aperto', note||'', '', oggi, '', // col J: secondoOperaio vuoto
-        req.body.interventoCollegato || '' // col K: collegamento
+        statoIniziale, note||'', '', oggi, '',
+        req.body.interventoCollegato || ''
       ]] },
     });
 
@@ -454,7 +455,8 @@ app.post('/crea-intervento', async (req, res) => {
       });
     }
 
-    // Notifica push all'operaio assegnato
+    // Notifica push all'operaio assegnato (solo se non è un backlog)
+    if (statoIniziale !== 'DaAssegnare') {
     const rImp = await leggi(sheets, SH.IMPIANTI);
     const impRow = rImp.slice(1).find(r => r[0] === codiceImpianto);
     const nomeImp = impRow ? impRow[1] : codiceImpianto;
@@ -463,6 +465,7 @@ app.post('/crea-intervento', async (req, res) => {
       '📋 Nuovo intervento assegnato',
       `${nomeImp} — ${tipoVisita} · ${dataFmt}`
     );
+    }
 
     res.json({ ok: true, id });
   } catch (err) {
