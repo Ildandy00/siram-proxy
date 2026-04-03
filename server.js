@@ -21,6 +21,7 @@ const SH = {
   ASSENZE:     'Assenze',
   PUSHTOKENS:  'PushTokens',
   PREVENTIVI:  'Preventivi',
+  RDACAT:      'RdaCat',
 };
 
 // ============================================================
@@ -841,6 +842,112 @@ app.post('/elimina-preventivo', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('POST /elimina-preventivo error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  GET /rdacat — lista richieste RDA/CAT
+// ============================================================
+app.get('/rdacat', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.RDACAT).catch(() => []);
+    const richieste = rows.slice(1).filter(r => r[0]).map(r => ({
+      id:             r[0] || '',
+      idIntervento:   r[1] || '',
+      codiceImpianto: r[2] || '',
+      tipologia:      r[3] || '',
+      nota:           r[4] || '',
+      operaio:        r[5] || '',
+      stato:          r[6] || 'Inviata',
+      creatoIl:       r[7] || '',
+      aggiornatoIl:   r[8] || '',
+    }));
+    res.json({ richieste });
+  } catch (err) {
+    console.error('GET /rdacat error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  POST /crea-rdacat
+//  Body: { idIntervento, codiceImpianto, tipologia, nota, operaio }
+// ============================================================
+app.post('/crea-rdacat', async (req, res) => {
+  try {
+    const { idIntervento, codiceImpianto, tipologia, nota, operaio } = req.body;
+    const sheets = await getSheets();
+    const id     = 'RDA-' + Math.random().toString(36).substring(2, 10).toUpperCase();
+    const oggi   = new Date().toLocaleDateString('it-IT');
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: SH.RDACAT,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [[
+        id, idIntervento, codiceImpianto, tipologia, nota, operaio, 'Inviata', oggi, ''
+      ]] },
+    });
+
+    // Notifica push al responsabile (non abbiamo token responsabile, logghiamo)
+    console.log(`RDA/CAT da ${operaio} — ${tipologia} — ${codiceImpianto}`);
+
+    res.json({ ok: true, id });
+  } catch (err) {
+    console.error('POST /crea-rdacat error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  POST /aggiorna-rdacat
+//  Body: { id, stato }  stato: Inviata|In lavorazione|Completata|Annullata
+// ============================================================
+app.post('/aggiorna-rdacat', async (req, res) => {
+  try {
+    const { id, stato } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.RDACAT);
+    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
+    if (idx < 1) return res.json({ ok: false, errore: 'RDA non trovata' });
+    const oggi = new Date().toLocaleDateString('it-IT');
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `${SH.RDACAT}!G${idx+1}:I${idx+1}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [[stato, rows[idx][7], oggi]] },
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /aggiorna-rdacat error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  POST /elimina-rdacat
+//  Body: { id }
+// ============================================================
+app.post('/elimina-rdacat', async (req, res) => {
+  try {
+    const { id } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.RDACAT);
+    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
+    if (idx > 0) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: { requests: [{ deleteDimension: {
+          range: { sheetId: await getSheetId(sheets, SH.RDACAT), dimension:'ROWS', startIndex:idx, endIndex:idx+1 }
+        }}]},
+      });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /elimina-rdacat error:', err.message);
     res.status(500).json({ ok: false, errore: err.message });
   }
 });
