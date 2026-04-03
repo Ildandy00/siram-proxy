@@ -20,6 +20,7 @@ const SH = {
   CHECKLIST:   'ChecklistEsecuzione',
   ASSENZE:     'Assenze',
   PUSHTOKENS:  'PushTokens',
+  PREVENTIVI:  'Preventivi',
 };
 
 // ============================================================
@@ -689,6 +690,137 @@ app.post('/elimina-catalogo', async (req, res) => {
     }
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// ============================================================
+//  GET /preventivi — lista tutte le richieste preventivo
+// ============================================================
+app.get('/preventivi', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.PREVENTIVI).catch(() => []);
+    const preventivi = rows.slice(1).filter(r => r[0]).map(r => ({
+      id:             r[0] || '',
+      idIntervento:   r[1] || '',
+      idChecklist:    r[2] || '',
+      codiceImpianto: r[3] || '',
+      attivita:       r[4] || '',
+      notaOperaio:    r[5] || '',
+      operaio:        r[6] || '',
+      stato:          r[7] || 'Richiesto',
+      creatoIl:       r[8] || '',
+      aggiornatoIl:   r[9] || '',
+    }));
+    res.json({ preventivi });
+  } catch (err) {
+    console.error('GET /preventivi error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  POST /richiedi-preventivo
+//  Body: { idIntervento, idChecklist, codiceImpianto, attivita, notaOperaio, operaio }
+// ============================================================
+app.post('/richiedi-preventivo', async (req, res) => {
+  try {
+    const { idIntervento, idChecklist, codiceImpianto, attivita, notaOperaio, operaio } = req.body;
+    const sheets = await getSheets();
+    const id     = 'PRE-' + Math.random().toString(36).substring(2, 10).toUpperCase();
+    const oggi   = new Date().toLocaleDateString('it-IT');
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: SH.PREVENTIVI,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [[
+        id, idIntervento, idChecklist, codiceImpianto,
+        attivita, notaOperaio, operaio, 'Richiesto', oggi, ''
+      ]] },
+    });
+
+    // Notifica push al responsabile — non abbiamo il token responsabile
+    // ma possiamo loggare per ora
+    console.log(`Preventivo richiesto da ${operaio} per ${codiceImpianto}: ${attivita}`);
+
+    res.json({ ok: true, id });
+  } catch (err) {
+    console.error('POST /richiedi-preventivo error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  POST /aggiorna-preventivo
+//  Body: { id, stato }  stato: Richiesto|Inviato|Accettato|Rifiutato
+// ============================================================
+app.post('/aggiorna-preventivo', async (req, res) => {
+  try {
+    const { id, stato } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.PREVENTIVI);
+    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
+    if (idx < 1) return res.json({ ok: false, errore: 'Preventivo non trovato' });
+
+    const oggi = new Date().toLocaleDateString('it-IT');
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `${SH.PREVENTIVI}!H${idx+1}:J${idx+1}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [[stato, rows[idx][8], oggi]] },
+    });
+
+    // Se accettato o rifiutato, sblocca la voce checklist collegata
+    if (stato === 'Accettato' || stato === 'Rifiutato') {
+      const idChecklist = rows[idx][2];
+      if (idChecklist) {
+        const rChk = await leggi(sheets, SH.CHECKLIST);
+        const chkIdx = rChk.findIndex((r,i) => i > 0 && r[0] === idChecklist);
+        if (chkIdx > 0) {
+          // Rimuovi flag preventivo dalla nota (colonna F)
+          const notaAttuale = rChk[chkIdx][5] || '';
+          const nuovaNota = notaAttuale.replace('[PREVENTIVO]', '').trim();
+          await sheets.spreadsheets.values.update({
+            spreadsheetId: SHEET_ID,
+            range: `${SH.CHECKLIST}!F${chkIdx+1}`,
+            valueInputOption: 'RAW',
+            requestBody: { values: [[nuovaNota]] },
+          });
+        }
+      }
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /aggiorna-preventivo error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  POST /elimina-preventivo
+//  Body: { id }
+// ============================================================
+app.post('/elimina-preventivo', async (req, res) => {
+  try {
+    const { id } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.PREVENTIVI);
+    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
+    if (idx > 0) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: { requests: [{ deleteDimension: {
+          range: { sheetId: await getSheetId(sheets, SH.PREVENTIVI), dimension:'ROWS', startIndex:idx, endIndex:idx+1 }
+        }}]},
+      });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /elimina-preventivo error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
 });
 
 // Helper — ottieni sheetId numerico dal nome foglio
