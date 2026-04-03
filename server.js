@@ -566,6 +566,28 @@ app.post('/elimina-assenza', async (req, res) => {
 });
 
 // ============================================================
+//  POST /notifica-fmp — push notification da GAS per mail FMP
+//  Body: { operaio, codiceImpianto, note, id }
+// ============================================================
+app.post('/notifica-fmp', async (req, res) => {
+  try {
+    const { operaio, codiceImpianto, note, id } = req.body;
+    const sheets = await getSheets();
+    const rImp   = await leggi(sheets, SH.IMPIANTI);
+    const impRow = rImp.slice(1).find(r => r[0] === codiceImpianto);
+    const nome   = impRow ? impRow[1] : codiceImpianto;
+    await pushNotifica(sheets, [operaio],
+      '🚨 Nuova segnalazione FMP',
+      `${nome} — ${note.slice(0,80)}`
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /notifica-fmp error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
 //  POST /imposta-collegamento
 //  Body: { id, interventoCollegato }
 // ============================================================
