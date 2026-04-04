@@ -312,6 +312,24 @@ app.post('/aggiorna-intervento', async (req, res) => {
       }
     }
 
+    // Salva nota di chiusura se presente (colonna G = Note)
+    const notaChiusura = req.body.notaChiusura;
+    if (stato === 'Chiuso' && notaChiusura) {
+      const rowNota = rows.findIndex((r, idx) => idx > 0 && r[0] === id);
+      if (rowNota > 0) {
+        const notaEsistente = rows[rowNota][6] || '';
+        const nuovaNota = notaEsistente
+          ? notaEsistente + ' | Chiusura: ' + notaChiusura
+          : 'Chiusura: ' + notaChiusura;
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: SHEET_ID,
+          range: `${SH.INTERVENTI}!G${rowNota+1}`,
+          valueInputOption: 'RAW',
+          requestBody: { values: [[nuovaNota]] },
+        });
+      }
+    }
+
     // Aggiorna l'intervento principale
     await aggiornaRiga(id);
 
