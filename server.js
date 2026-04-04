@@ -21,7 +21,8 @@ const SH = {
   ASSENZE:     'Assenze',
   PUSHTOKENS:  'PushTokens',
   PREVENTIVI:  'Preventivi',
-  RDACAT:      'RdaCat',
+  RDACAT:        'RdaCat',
+  REPERIBILITA:  'Reperibilita',
 };
 
 // ============================================================
@@ -948,6 +949,92 @@ app.post('/elimina-rdacat', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('POST /elimina-rdacat error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  GET /reperibile — operaio reperibile della settimana corrente
+// ============================================================
+app.get('/reperibile', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.REPERIBILITA).catch(() => []);
+    const oggi   = new Date();
+    // Lunedì della settimana corrente
+    const dow    = oggi.getDay() === 0 ? 6 : oggi.getDay() - 1;
+    const lun    = new Date(oggi);
+    lun.setDate(oggi.getDate() - dow);
+    lun.setHours(0,0,0,0);
+    const lunStr = lun.toISOString().slice(0,10);
+
+    // Cerca riga con data lunedì della settimana corrente
+    const riga = rows.slice(1).find(r => {
+      if (!r[0]) return false;
+      try {
+        const d = new Date(r[0]);
+        return d.toISOString().slice(0,10) === lunStr;
+      } catch(e) { return false; }
+    });
+
+    // Lista settimane (ultime 4 + prossime 4)
+    const settimane = [];
+    for (let i = -2; i <= 6; i++) {
+      const s = new Date(lun);
+      s.setDate(lun.getDate() + i * 7);
+      const sStr = s.toISOString().slice(0,10);
+      const rigaS = rows.slice(1).find(r => {
+        try { return new Date(r[0]).toISOString().slice(0,10) === sStr; } catch(e) { return false; }
+      });
+      settimane.push({ data: sStr, operaio: rigaS ? rigaS[1] : '' });
+    }
+
+    res.json({
+      corrente:   { data: lunStr, operaio: riga ? riga[1] : null },
+      settimane,
+    });
+  } catch (err) {
+    console.error('GET /reperibile error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  POST /salva-reperibile
+//  Body: { data (lunedì settimana), operaio }
+// ============================================================
+app.post('/salva-reperibile', async (req, res) => {
+  try {
+    const { data, operaio } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.REPERIBILITA).catch(() => []);
+
+    const idx = rows.findIndex((r,i) => {
+      if (i === 0 || !r[0]) return false;
+      try { return new Date(r[0]).toISOString().slice(0,10) === data; } catch(e) { return false; }
+    });
+
+    if (idx > 0) {
+      // Aggiorna riga esistente
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: `${SH.REPERIBILITA}!A${idx+1}:B${idx+1}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[data, operaio]] },
+      });
+    } else {
+      // Aggiungi nuova riga
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SHEET_ID,
+        range: SH.REPERIBILITA,
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: [[data, operaio]] },
+      });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /salva-reperibile error:', err.message);
     res.status(500).json({ ok: false, errore: err.message });
   }
 });
