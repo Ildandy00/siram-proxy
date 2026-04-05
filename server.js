@@ -752,6 +752,7 @@ app.get('/preventivi', async (req, res) => {
       stato:          r[7] || 'Richiesto',
       creatoIl:       r[8] || '',
       aggiornatoIl:   r[9] || '',
+      linkDrive:      r[10] || '',
     }));
     res.json({ preventivi });
   } catch (err) {
@@ -1053,6 +1054,33 @@ app.post('/salva-reperibile', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('POST /salva-reperibile error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  POST /salva-link-drive
+//  Body: { id, tipo ('intervento'|'preventivo'), linkDrive }
+// ============================================================
+app.post('/salva-link-drive', async (req, res) => {
+  try {
+    const { id, tipo, linkDrive } = req.body;
+    const sheets = await getSheets();
+    const foglio = tipo === 'preventivo' ? SH.PREVENTIVI : SH.INTERVENTI;
+    const colIdx = tipo === 'preventivo' ? 11 : 12; // K=11, L=12 (1-based)
+    const rows   = await leggi(sheets, foglio);
+    const idx    = rows.findIndex((r, i) => i > 0 && r[0] === id);
+    if (idx < 1) return res.json({ ok: false, errore: 'Record non trovato' });
+    const col = String.fromCharCode(64 + colIdx);
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `${foglio}!${col}${idx+1}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [[linkDrive]] },
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /salva-link-drive error:', err.message);
     res.status(500).json({ ok: false, errore: err.message });
   }
 });
