@@ -210,6 +210,9 @@ app.get('/dati', async (req, res) => {
       creatoIl:            fmtData(r[8]),
       secondoOperaio:      r[9] || '',
       interventoCollegato: r[10] || '',
+      linkDrive:           r[11] || '',
+      dataFine:            fmtData(r[12]),
+      operaioSecondario2:  r[13] || '',
     }));
 
     const checklist = rChk.slice(1).filter(r => r[0]).map(r => ({
@@ -418,6 +421,7 @@ app.get('/dati-responsabile', async (req, res) => {
       operaio: r[3]||'', tipoVisita: r[4]||'', stato: r[5]||'',
       note: r[6]||'', dataChiusura: fmtData(r[7]), creatoIl: fmtData(r[8]),
       secondoOperaio: r[9]||'', interventoCollegato: r[10]||'',
+      linkDrive: r[11]||'', dataFine: fmtData(r[12]), operaioSecondario2: r[13]||'',
     }));
     const checklist = rChk.slice(1).filter(r => r[0]).map(r => ({
       id: r[0]||'', idIntervento: r[1]||'', attivita: r[2]||'',
