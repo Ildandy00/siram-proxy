@@ -1098,6 +1098,31 @@ app.post('/salva-link-drive', async (req, res) => {
   }
 });
 
+// ============================================================
+//  POST /aggiorna-multigiorno
+//  Body: { id, dataFine, operaioSecondario2 }
+// ============================================================
+app.post('/aggiorna-multigiorno', async (req, res) => {
+  try {
+    const { id, dataFine, operaioSecondario2 } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.INTERVENTI);
+    const idx    = rows.findIndex((r, i) => i > 0 && r[0] === id);
+    if (idx < 1) return res.json({ ok: false, errore: 'Intervento non trovato' });
+    // M=col13, N=col14 (1-based)
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `${SH.INTERVENTI}!M${idx+1}:N${idx+1}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [[dataFine || '', operaioSecondario2 || '']] },
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /aggiorna-multigiorno error:', err.message);
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
 // Helper — ottieni sheetId numerico dal nome foglio
 async function getSheetId(sheets, name) {
   const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
