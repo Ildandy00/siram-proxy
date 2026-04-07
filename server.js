@@ -285,7 +285,7 @@ app.post('/aggiorna-voce', async (req, res) => {
 // ============================================================
 app.post('/aggiorna-intervento', async (req, res) => {
   try {
-    const { id, stato } = req.body;
+    const { id, stato, operaio } = req.body;
     const sheets = await getSheets();
     const rows   = await leggi(sheets, SH.INTERVENTI);
     const ora    = stato === 'Chiuso'
@@ -326,6 +326,19 @@ app.post('/aggiorna-intervento', async (req, res) => {
           range: `${SH.INTERVENTI}!G${rowNota+1}`,
           valueInputOption: 'RAW',
           requestBody: { values: [[nuovaNota]] },
+        });
+      }
+    }
+
+    // Aggiorna operaio se cambiato (colonna D = indice 3)
+    if (operaio) {
+      const rowOp = rows.findIndex((r, idx) => idx > 0 && r[0] === id);
+      if (rowOp > 0) {
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: SHEET_ID,
+          range: `${SH.INTERVENTI}!D${rowOp+1}`,
+          valueInputOption: 'RAW',
+          requestBody: { values: [[operaio]] },
         });
       }
     }
