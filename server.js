@@ -443,7 +443,9 @@ app.get('/dati-responsabile', async (req, res) => {
 app.post('/crea-intervento', async (req, res) => {
   try {
     const { codiceImpianto, dataPrevista, operaio, tipoVisita, note, attivitaExtra } = req.body;
-    const statoIniziale = req.body.statoOverride || 'Aperto';
+    const statoIniziale       = req.body.statoOverride || 'Aperto';
+    const dataFine            = req.body.dataFine || '';
+    const operaioSecondario2  = req.body.operaioSecondario2 || '';
     const sheets = await getSheets();
 
     const id    = 'INT-' + Math.random().toString(36).substring(2, 10).toUpperCase();
@@ -457,7 +459,7 @@ app.post('/crea-intervento', async (req, res) => {
       requestBody: { values: [[
         id, codiceImpianto, dataPrevista, operaio, tipoVisita,
         statoIniziale, note||'', '', oggi, '',
-        req.body.interventoCollegato || ''
+        req.body.interventoCollegato || '', '', dataFine, operaioSecondario2
       ]] },
     });
 
