@@ -313,6 +313,22 @@ app.post('/aggiorna-intervento', async (req, res) => {
           requestBody: { values: [[ora]] },
         });
       }
+      // Riapertura: aggiungi riga cronologica nella nota, svuota data chiusura
+      if (stato === 'Aperto') {
+        const notaAttuale = rows[i][6] || '';
+        const dataRiapertura = new Date().toLocaleString('it-IT', {
+          day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'
+        });
+        const notaAggiornata = notaAttuale
+          ? notaAttuale + ` | 🔄 Riaperto il ${dataRiapertura}`
+          : `🔄 Riaperto il ${dataRiapertura}`;
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: SHEET_ID,
+          range: `${SH.INTERVENTI}!G${i+1}:H${i+1}`,
+          valueInputOption: 'RAW',
+          requestBody: { values: [[notaAggiornata, '']] },
+        });
+      }
     }
 
     // Salva nota di chiusura se presente (colonna G = Note)
