@@ -627,16 +627,16 @@ app.post('/crea-offerta', async (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
 
-// POST /seleziona-offerta — imposta una offerta come selezionata, deseleziona le altre della stessa pratica
+// POST /seleziona-offerta — seleziona o deseleziona un'offerta
+// id: ID offerta da selezionare, oppure null per deselezionare tutte
 app.post('/seleziona-offerta', async (req, res) => {
   try {
     const { id, idPratica } = req.body;
     const sheets = await getSheets();
     const rows   = await leggi(sheets, SH.OFFERTE);
-    // Deseleziona tutte le offerte della pratica, poi seleziona quella scelta
     for (let i = 1; i < rows.length; i++) {
       if (rows[i][1] === idPratica) {
-        const sel = rows[i][0] === id ? 'SI' : 'NO';
+        const sel = (id && rows[i][0] === id) ? 'SI' : 'NO';
         await sheets.spreadsheets.values.update({
           spreadsheetId: SHEET_ID, range: `${SH.OFFERTE}!H${i+1}`,
           valueInputOption: 'RAW', requestBody: { values: [[sel]] },
