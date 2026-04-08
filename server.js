@@ -191,13 +191,14 @@ app.get('/dati-responsabile', async (req, res) => {
     const interventi = rInt.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', codiceImpianto:r[1]||'', dataPrevista:fmtData(r[2]), operaio:r[3]||'', tipoVisita:r[4]||'', stato:r[5]||'', note:r[6]||'', dataChiusura:fmtData(r[7]), creatoIl:fmtData(r[8]), secondoOperaio:r[9]||'', interventoCollegato:r[10]||'', linkDrive:r[11]||'', dataFine:fmtData(r[12]), operaioSecondario2:r[13]||'' }));
     const checklist  = rChk.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', idIntervento:r[1]||'', attivita:r[2]||'', eseguita:r[3]||'NO', oraCompletamento:fmtDateTime(r[4]), note:r[5]||'', extra:r[6]||'NO' }));
     const assenze    = rAss.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', operaio:r[1]||'', dataInizio:fmtData(r[2]), dataFine:fmtData(r[3]), tipo:r[4]||'', note:r[5]||'' }));
-    // Pratiche
-    // Colonne: ID(0) | IDIntervento(1) | CodiceImpianto(2) | Stato(3) |
+    // Pratiche — colonne aggiornate con step Offerta Fornitore
+    // ID(0) | IDIntervento(1) | CodiceImpianto(2) | Stato(3) |
     //   DataRichiesta(4) | NoteRichiesta(5) | LinkRichiesta(6) |
-    //   DataPreventivo(7) | ImportoPreventivo(8) | LinkPreventivo(9) |
-    //   DataBdo(10) | NumeroBdo(11) | LinkBdo(12) |
-    //   DataDdt(13) | NumeroDdt(14) | LinkDdt(15) |
-    //   DataChiusura(16) | NoteChiusura(17) | CreatoIl(18)
+    //   DataOfferta(7) | FornitoreOfferta(8) | ImportoOfferta(9) | LinkOfferta(10) |
+    //   DataPreventivo(11) | ImportoPreventivo(12) | LinkPreventivo(13) |
+    //   DataBdo(14) | NumeroBdo(15) | LinkBdo(16) |
+    //   DataDdt(17) | NumeroDdt(18) | LinkDdt(19) |
+    //   DataChiusura(20) | NoteChiusura(21) | CreatoIl(22)
     const pratiche = rPrat.slice(1).filter(r=>r[0]).map(r=>({
       id:               r[0]||'',
       idIntervento:     r[1]||'',
@@ -206,18 +207,22 @@ app.get('/dati-responsabile', async (req, res) => {
       dataRichiesta:    fmtData(r[4]),
       noteRichiesta:    r[5]||'',
       linkRichiesta:    r[6]||'',
-      dataPreventivo:   fmtData(r[7]),
-      importoPreventivo:r[8]||'',
-      linkPreventivo:   r[9]||'',
-      dataBdo:          fmtData(r[10]),
-      numeroBdo:        r[11]||'',
-      linkBdo:          r[12]||'',
-      dataDdt:          fmtData(r[13]),
-      numeroDdt:        r[14]||'',
-      linkDdt:          r[15]||'',
-      dataChiusura:     fmtData(r[16]),
-      noteChiusura:     r[17]||'',
-      creatoIl:         fmtData(r[18]),
+      dataOfferta:      fmtData(r[7]),
+      fornitoreOfferta: r[8]||'',
+      importoOfferta:   r[9]||'',
+      linkOfferta:      r[10]||'',
+      dataPreventivo:   fmtData(r[11]),
+      importoPreventivo:r[12]||'',
+      linkPreventivo:   r[13]||'',
+      dataBdo:          fmtData(r[14]),
+      numeroBdo:        r[15]||'',
+      linkBdo:          r[16]||'',
+      dataDdt:          fmtData(r[17]),
+      numeroDdt:        r[18]||'',
+      linkDdt:          r[19]||'',
+      dataChiusura:     fmtData(r[20]),
+      noteChiusura:     r[21]||'',
+      creatoIl:         fmtData(r[22]),
     }));
     res.json({ impianti, catalogo, interventi, checklist, assenze, pratiche });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
@@ -377,10 +382,11 @@ app.post('/elimina-catalogo', async (req, res) => {
 //  Colonne foglio "Pratiche":
 //  A=ID | B=IDIntervento | C=CodiceImpianto | D=Stato |
 //  E=DataRichiesta | F=NoteRichiesta | G=LinkRichiesta |
-//  H=DataPreventivo | I=ImportoPreventivo | J=LinkPreventivo |
-//  K=DataBdo | L=NumeroBdo | M=LinkBdo |
-//  N=DataDdt | O=NumeroDdt | P=LinkDdt |
-//  Q=DataChiusura | R=NoteChiusura | S=CreatoIl
+//  H=DataOfferta | I=FornitoreOfferta | J=ImportoOfferta | K=LinkOfferta |
+//  L=DataPreventivo | M=ImportoPreventivo | N=LinkPreventivo |
+//  O=DataBdo | P=NumeroBdo | Q=LinkBdo |
+//  R=DataDdt | S=NumeroDdt | T=LinkDdt |
+//  U=DataChiusura | V=NoteChiusura | W=CreatoIl
 // ============================================================
 
 // GET /pratiche — tutte le pratiche
@@ -396,18 +402,22 @@ app.get('/pratiche', async (req, res) => {
       dataRichiesta:    fmtData(r[4]),
       noteRichiesta:    r[5]||'',
       linkRichiesta:    r[6]||'',
-      dataPreventivo:   fmtData(r[7]),
-      importoPreventivo:r[8]||'',
-      linkPreventivo:   r[9]||'',
-      dataBdo:          fmtData(r[10]),
-      numeroBdo:        r[11]||'',
-      linkBdo:          r[12]||'',
-      dataDdt:          fmtData(r[13]),
-      numeroDdt:        r[14]||'',
-      linkDdt:          r[15]||'',
-      dataChiusura:     fmtData(r[16]),
-      noteChiusura:     r[17]||'',
-      creatoIl:         fmtData(r[18]),
+      dataOfferta:      fmtData(r[7]),
+      fornitoreOfferta: r[8]||'',
+      importoOfferta:   r[9]||'',
+      linkOfferta:      r[10]||'',
+      dataPreventivo:   fmtData(r[11]),
+      importoPreventivo:r[12]||'',
+      linkPreventivo:   r[13]||'',
+      dataBdo:          fmtData(r[14]),
+      numeroBdo:        r[15]||'',
+      linkBdo:          r[16]||'',
+      dataDdt:          fmtData(r[17]),
+      numeroDdt:        r[18]||'',
+      linkDdt:          r[19]||'',
+      dataChiusura:     fmtData(r[20]),
+      noteChiusura:     r[21]||'',
+      creatoIl:         fmtData(r[22]),
     }));
     res.json({ pratiche });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
@@ -428,11 +438,12 @@ app.post('/crea-pratica', async (req, res) => {
       requestBody: { values: [[
         id, idIntervento||'', codiceImpianto, 'Richiesta',
         dataOggi, noteRichiesta||'', linkRichiesta||'',
-        '', '', '',   // preventivo
-        '', '', '',   // bdo
-        '', '', '',   // ddt
-        '', '',       // chiusura
-        oggi          // creatoIl
+        '', '', '', '',   // offerta fornitore
+        '', '', '',       // preventivo
+        '', '', '',       // bdo
+        '', '', '',       // ddt
+        '', '',           // chiusura
+        oggi              // creatoIl
       ]] },
     });
     res.json({ ok: true, id });
@@ -450,15 +461,16 @@ app.post('/aggiorna-pratica', async (req, res) => {
     const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
     if (idx < 1) return res.json({ ok: false, errore: 'Pratica non trovata' });
 
-    const STATI = ['Richiesta','Preventivo','BdO','DDT','Chiusa'];
+    const STATI = ['Richiesta','Offerta','Preventivo','BdO','DDT','Chiusa'];
 
-    // Mappa step → colonne da aggiornare (0-based index nel foglio)
+    // Mappa step → colonne (tutte shiftate di 4 per via del nuovo step Offerta)
     const stepMap = {
-      richiesta:  { range: `${SH.PRATICHE}!E${idx+1}:G${idx+1}`,  fields: ['dataRichiesta','noteRichiesta','linkRichiesta'],      statoNew: 'Richiesta' },
-      preventivo: { range: `${SH.PRATICHE}!H${idx+1}:J${idx+1}`,  fields: ['dataPreventivo','importoPreventivo','linkPreventivo'], statoNew: 'Preventivo' },
-      bdo:        { range: `${SH.PRATICHE}!K${idx+1}:M${idx+1}`,  fields: ['dataBdo','numeroBdo','linkBdo'],                      statoNew: 'BdO' },
-      ddt:        { range: `${SH.PRATICHE}!N${idx+1}:P${idx+1}`,  fields: ['dataDdt','numeroDdt','linkDdt'],                      statoNew: 'DDT' },
-      chiuso:     { range: `${SH.PRATICHE}!Q${idx+1}:R${idx+1}`,  fields: ['dataChiusura','noteChiusura'],                        statoNew: 'Chiusa' },
+      richiesta:  { range: `${SH.PRATICHE}!E${idx+1}:G${idx+1}`,  fields: ['dataRichiesta','noteRichiesta','linkRichiesta'],           statoNew: 'Richiesta' },
+      offerta:    { range: `${SH.PRATICHE}!H${idx+1}:K${idx+1}`,  fields: ['dataOfferta','fornitoreOfferta','importoOfferta','linkOfferta'], statoNew: 'Offerta' },
+      preventivo: { range: `${SH.PRATICHE}!L${idx+1}:N${idx+1}`,  fields: ['dataPreventivo','importoPreventivo','linkPreventivo'],      statoNew: 'Preventivo' },
+      bdo:        { range: `${SH.PRATICHE}!O${idx+1}:Q${idx+1}`,  fields: ['dataBdo','numeroBdo','linkBdo'],                           statoNew: 'BdO' },
+      ddt:        { range: `${SH.PRATICHE}!R${idx+1}:T${idx+1}`,  fields: ['dataDdt','numeroDdt','linkDdt'],                           statoNew: 'DDT' },
+      chiuso:     { range: `${SH.PRATICHE}!U${idx+1}:V${idx+1}`,  fields: ['dataChiusura','noteChiusura'],                             statoNew: 'Chiusa' },
     };
 
     const s = stepMap[step];
