@@ -214,6 +214,7 @@ app.get('/dati-responsabile', async (req, res) => {
       dataChiusura:     fmtData(r[16]),
       noteChiusura:     r[17]||'',
       creatoIl:         fmtData(r[18]),
+      inGestione:       r[19]==='SI',
     }));
     // Offerte — foglio separato
     // A=ID | B=IDPratica | C=Fornitore | D=Descrizione | E=Importo | F=Data | G=LinkDrive | H=Selezionata | I=Note
@@ -383,15 +384,16 @@ app.post('/elimina-catalogo', async (req, res) => {
 
 // ============================================================
 //  PRATICHE — CRUD COMPLETO
-//  Colonne foglio "Pratiche" (19 colonne, A→S):
+//  Colonne foglio "Pratiche" (20 colonne, A→T):
 //  A=ID | B=IDIntervento | C=CodiceImpianto | D=Stato |
 //  E=DataRichiesta | F=NoteRichiesta | G=LinkRichiesta |
 //  H=DataPreventivo | I=ImportoPreventivo | J=LinkPreventivo |
 //  K=DataBdo | L=NumeroBdo | M=LinkBdo |
 //  N=DataDdt | O=NumeroDdt | P=LinkDdt |
-//  Q=DataChiusura | R=NoteChiusura | S=CreatoIl
+//  Q=DataChiusura | R=NoteChiusura | S=CreatoIl | T=InGestione
 //
 //  Stato iter: Richiesta → Offerta → Preventivo → BdO → DDT → Chiusa
+//  InGestione=SI bypassa il preventivo (lavori in gestione diretta)
 //  Le offerte sono gestite nel foglio separato "Offerte"
 // ============================================================
 
@@ -420,6 +422,7 @@ app.get('/pratiche', async (req, res) => {
       dataChiusura:     fmtData(r[16]),
       noteChiusura:     r[17]||'',
       creatoIl:         fmtData(r[18]),
+      inGestione:       r[19]==='SI',
     }));
     res.json({ pratiche });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
@@ -508,6 +511,34 @@ app.post('/avanza-stato-offerta', async (req, res) => {
         spreadsheetId: SHEET_ID, range: `${SH.PRATICHE}!D${idx+1}`,
         valueInputOption: 'RAW', requestBody: { values: [['Offerta']] },
       });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// POST /imposta-gestione — segna pratica come "in gestione" e avanza a BdO
+app.post('/imposta-gestione', async (req, res) => {
+  try {
+    const { id, valore } = req.body; // valore: true/false
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.PRATICHE);
+    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
+    if (idx < 1) return res.json({ ok: false, errore: 'Pratica non trovata' });
+    // Salva flag in colonna T (indice 19)
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID, range: `${SH.PRATICHE}!T${idx+1}`,
+      valueInputOption: 'RAW', requestBody: { values: [[valore ? 'SI' : 'NO']] },
+    });
+    // Se attivato, avanza stato a BdO (salta Preventivo)
+    if (valore) {
+      const STATI = ['Richiesta','Offerta','Preventivo','BdO','DDT','Chiusa'];
+      const statoAtt = rows[idx][3] || 'Richiesta';
+      if (STATI.indexOf(statoAtt) < STATI.indexOf('BdO')) {
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: SHEET_ID, range: `${SH.PRATICHE}!D${idx+1}`,
+          valueInputOption: 'RAW', requestBody: { values: [['BdO']] },
+        });
+      }
     }
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
