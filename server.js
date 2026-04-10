@@ -215,7 +215,6 @@ app.get('/dati-responsabile', async (req, res) => {
       noteChiusura:     r[17]||'',
       creatoIl:         fmtData(r[18]),
       inGestione:       r[19]==='SI',
-      operai:           r[20]||'',
     }));
     // Offerte — foglio separato
     // A=ID | B=IDPratica | C=Fornitore | D=Descrizione | E=Importo | F=Data | G=LinkDrive | H=Selezionata | I=Note
@@ -385,17 +384,18 @@ app.post('/elimina-catalogo', async (req, res) => {
 
 // ============================================================
 //  PRATICHE — CRUD COMPLETO
-//  Colonne foglio "Pratiche" (21 colonne, A→U):
+//  Colonne foglio "Pratiche" (20 colonne, A→T):
 //  A=ID | B=IDIntervento | C=CodiceImpianto | D=Stato |
 //  E=DataRichiesta | F=NoteRichiesta | G=LinkRichiesta |
 //  H=DataPreventivo | I=ImportoPreventivo | J=LinkPreventivo |
 //  K=DataBdo | L=NumeroBdo | M=LinkBdo |
 //  N=DataDdt | O=NumeroDdt | P=LinkDdt |
-//  Q=DataChiusura | R=NoteChiusura | S=CreatoIl | T=InGestione | U=Operai
+//  Q=DataChiusura | R=NoteChiusura | S=CreatoIl | T=InGestione
 //
 //  Stato iter: Richiesta → Offerta → Preventivo → BdO → DDT → Chiusa
 //  InGestione=SI bypassa il preventivo
-//  Operai = lista separata da virgola es. "Matteo,Ezio"
+//  Gli interventi di realizzazione sono nel foglio Interventi con
+//  note contenente [PRA:ID] come riferimento alla pratica
 //  Le offerte sono gestite nel foglio separato "Offerte"
 // ============================================================
 
@@ -425,7 +425,6 @@ app.get('/pratiche', async (req, res) => {
       noteChiusura:     r[17]||'',
       creatoIl:         fmtData(r[18]),
       inGestione:       r[19]==='SI',
-      operai:           r[20]||'',
     }));
     res.json({ pratiche });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
@@ -452,7 +451,6 @@ app.post('/crea-pratica', async (req, res) => {
         '', '',       // chiusura
         oggi,         // creatoIl
         'NO',         // inGestione
-        '',           // operai
       ]] },
     });
     res.json({ ok: true, id });
@@ -517,23 +515,6 @@ app.post('/avanza-stato-offerta', async (req, res) => {
         valueInputOption: 'RAW', requestBody: { values: [['Offerta']] },
       });
     }
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
-});
-
-// POST /assegna-operai-pratica — salva lista operai in colonna U
-app.post('/assegna-operai-pratica', async (req, res) => {
-  try {
-    const { id, operai } = req.body; // operai: array di stringhe es. ['Matteo','Ezio']
-    const sheets = await getSheets();
-    const rows   = await leggi(sheets, SH.PRATICHE);
-    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
-    if (idx < 1) return res.json({ ok: false, errore: 'Pratica non trovata' });
-    const valore = Array.isArray(operai) ? operai.join(',') : (operai||'');
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID, range: `${SH.PRATICHE}!U${idx+1}`,
-      valueInputOption: 'RAW', requestBody: { values: [[valore]] },
-    });
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
