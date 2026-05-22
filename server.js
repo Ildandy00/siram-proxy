@@ -101,6 +101,22 @@ app.get('/dati', async (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
 
+// GET /impianti-operaio?operaio=Matteo
+// Restituisce i codici impianto assegnati all'operaio dal foglio Assegnazione
+app.get('/impianti-operaio', async (req, res) => {
+  try {
+    const { operaio } = req.query;
+    if (!operaio) return res.json({ codici: [] });
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.ASSEGNAZIONE || 'Assegnazione');
+    // Foglio Assegnazione: A=Codice, B=Descrizione, C=Comune, D=Operaio
+    const codici = rows.slice(1)
+      .filter(r => r[0] && r[3] && r[3].toString().trim() === operaio)
+      .map(r => r[0].toString().trim().toUpperCase());
+    res.json({ codici });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
 app.post('/aggiorna-voce', async (req, res) => {
   try {
     const { id, eseguita, note } = req.body;
