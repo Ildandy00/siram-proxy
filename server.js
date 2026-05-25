@@ -802,4 +802,10 @@ async function getSheetId(sheets, name) {
   return sheet.properties.sheetId;
 }
 
+// GET /preventivi — stub per compatibilità con client vecchi
+app.get('/preventivi', (req, res) => res.json({ preventivi: [] }));
+
+// POST /richiedi-preventivo — stub
+app.post('/richiedi-preventivo', (req, res) => res.json({ ok: true, id: 'PREV-' + Math.random().toString(36).substring(2,10).toUpperCase() }));
+
 app.listen(PORT, () => console.log(`Siram Proxy attivo sulla porta ${PORT}`));
