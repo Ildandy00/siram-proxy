@@ -968,9 +968,17 @@ app.post('/owntracks', async (req, res) => {
       return res.json({ ok: true }); // risponde ok per non far retry
     }
 
-    const operaio = payload.tid; // Device ID = nome operaio
-    const lat     = payload.lat;
-    const lon     = payload.lon;
+    // Ricava nome operaio dal topic (owntracks/NomeOperaio/deviceid)
+    // oppure dal campo tid come fallback
+    let operaio = '';
+    if (payload.topic) {
+      const parti = payload.topic.split('/');
+      // topic formato: owntracks/Username/DeviceID → parti[1] = Username
+      if (parti.length >= 2) operaio = parti[1];
+    }
+    if (!operaio && payload.tid) operaio = payload.tid;
+    const lat = payload.lat;
+    const lon = payload.lon;
 
     if (!operaio || lat == null || lon == null) {
       return res.json({ ok: false, errore: 'Dati mancanti' });
@@ -980,7 +988,7 @@ app.post('/owntracks', async (req, res) => {
     const now    = new Date();
     const oraOra = orarioItalia(now); // es. "07:31"
 
-    // Controlla se siamo vicini a uno degli orari target
+    console.log(`[OwnTracks] ricevuto da topic:${payload.topic} → operaio:${operaio} @ ${oraOra}`);
     const match = ORARI_PRESENZA_OT.find(o => minDiff(oraOra, o.ora) <= TOLLERANZA_MIN_OT);
     if (!match) {
       // Non è un orario di rilevamento — registra comunque ma senza tipo specifico
