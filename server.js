@@ -7,10 +7,6 @@ const PORT = process.env.PORT || 3000;
 
 const SHEET_ID = process.env.SHEET_ID || '1JsQz8FiUMFGjFQ5tuodgjexxe1hE8UE87ORFDi_geWE';
 
-// Spreadsheet separato per le segnalazioni FMP Pesaro
-const SEGNALAZIONI_SHEET_ID = process.env.SEGNALAZIONI_SHEET_ID
-  || '1AiZ9-zN6m7GTAgMOuK7ahW34t1WJUBRA3tmllBaco4M';
-
 const SH = {
   IMPIANTI:    'Impianti',
   CATALOGO:    'CatalogoAttivita',
@@ -22,6 +18,8 @@ const SH = {
   OFFERTE:     'Offerte',
   RDACAT:      'RdaCat',
   REPERIBILITA:'Reperibilita',
+  PRESENZE:    'Presenze',
+  ASSEGNAZIONE:'Assegnazione',
 };
 
 const webpush = require('web-push');
@@ -63,15 +61,6 @@ async function leggi(sheets, foglio) {
   return r.data.values || [];
 }
 
-// Legge dal foglio segnalazioni (spreadsheet separato)
-async function leggiSegnalazioni(sheets) {
-  const r = await sheets.spreadsheets.values.get({
-    spreadsheetId: SEGNALAZIONI_SHEET_ID,
-    range: 'Segnalazioni_Pesaro!A2:M',
-  });
-  return r.data.values || [];
-}
-
 function fmtData(val) {
   if (!val) return '';
   try { const d = new Date(val); if (isNaN(d.getTime())) return ''; return d.toISOString().slice(0,10); } catch(e) { return ''; }
@@ -79,50 +68,6 @@ function fmtData(val) {
 function fmtDateTime(val) {
   if (!val) return '';
   try { const d = new Date(val); if (isNaN(d.getTime())) return ''; return d.toLocaleString('it-IT', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }); } catch(e) { return ''; }
-}
-
-// ---- helpers aggregazione segnalazioni ----------------------
-function segToYearMonth(s) {
-  const p = (s || '').split('/');
-  return p.length === 3 ? `${p[2]}-${p[1]}` : null;
-}
-function segToDate(s) {
-  const p = (s || '').split('/');
-  return p.length === 3 ? new Date(`${p[2]}-${p[1]}-${p[0]}`) : null;
-}
-function aggregaSegnalazioni(rows) {
-  const impianti = {};
-  const trendMap = {};
-  let totale = 0;
-  for (const row of rows) {
-    const k    = String(row[5] || '').trim();
-    const nome = String(row[6] || '').trim();
-    const prio = String(row[7] || '').trim();
-    const tipo = String(row[8] || '').trim();
-    const data = String(row[1] || '').trim();
-    if (!k) continue;
-    totale++;
-    const mese = segToYearMonth(data);
-    if (mese) trendMap[mese] = (trendMap[mese] || 0) + 1;
-    if (!impianti[k]) {
-      impianti[k] = { codiceK: k, nome, totale: 0, priorita: {}, tipologie: {}, ultima_data: null };
-    }
-    const imp = impianti[k];
-    imp.totale++;
-    imp.priorita[prio] = (imp.priorita[prio] || 0) + 1;
-    const tipoBreve = tipo.replace(/^Intervento su impianto\s*/i, '').trim() || tipo;
-    imp.tipologie[tipoBreve] = (imp.tipologie[tipoBreve] || 0) + 1;
-    const d     = segToDate(data);
-    const dPrev = imp.ultima_data ? segToDate(imp.ultima_data) : null;
-    if (d && (!dPrev || d > dPrev)) imp.ultima_data = data;
-  }
-  return {
-    totale,
-    impianti: Object.values(impianti).sort((a, b) => b.totale - a.totale),
-    trend: Object.entries(trendMap)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([mese, count]) => ({ mese, count })),
-  };
 }
 
 app.get('/vapid-public', (req, res) => res.json({ key: VAPID_PUBLIC }));
@@ -158,12 +103,15 @@ app.get('/dati', async (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
 
+// GET /impianti-operaio?operaio=Matteo
+// Restituisce i codici impianto assegnati all'operaio dal foglio Assegnazione
 app.get('/impianti-operaio', async (req, res) => {
   try {
     const { operaio } = req.query;
     if (!operaio) return res.json({ codici: [] });
     const sheets = await getSheets();
     const rows   = await leggi(sheets, SH.ASSEGNAZIONE || 'Assegnazione');
+    // Foglio Assegnazione: A=Codice, B=Descrizione, C=Comune, D=Operaio
     const codici = rows.slice(1)
       .filter(r => r[0] && r[3] && r[3].toString().trim() === operaio)
       .map(r => r[0].toString().trim().toUpperCase());
@@ -263,6 +211,7 @@ app.get('/dati-responsabile', async (req, res) => {
     const interventi = rInt.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', codiceImpianto:r[1]||'', dataPrevista:fmtData(r[2]), operaio:r[3]||'', tipoVisita:r[4]||'', stato:r[5]||'', note:r[6]||'', dataChiusura:fmtData(r[7]), creatoIl:fmtData(r[8]), secondoOperaio:r[9]||'', interventoCollegato:r[10]||'', linkDrive:r[11]||'', dataFine:fmtData(r[12]), operaioSecondario2:r[13]||'' }));
     const checklist  = rChk.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', idIntervento:r[1]||'', attivita:r[2]||'', eseguita:r[3]||'NO', oraCompletamento:fmtDateTime(r[4]), note:r[5]||'', extra:r[6]||'NO' }));
     const assenze    = rAss.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', operaio:r[1]||'', dataInizio:fmtData(r[2]), dataFine:fmtData(r[3]), tipo:r[4]||'', note:r[5]||'' }));
+    // Pratiche — 19 colonne A→S
     const pratiche = rPrat.slice(1).filter(r=>r[0]).map(r=>({
       id:               r[0]||'',
       idIntervento:     r[1]||'',
@@ -285,6 +234,8 @@ app.get('/dati-responsabile', async (req, res) => {
       creatoIl:         fmtData(r[18]),
       inGestione:       r[19]==='SI',
     }));
+    // Offerte — foglio separato
+    // A=ID | B=IDPratica | C=Fornitore | D=Descrizione | E=Importo | F=Data | G=LinkDrive | H=Selezionata | I=Note
     const offerte = rOff.slice(1).filter(r=>r[0]).map(r=>({
       id:          r[0]||'',
       idPratica:   r[1]||'',
@@ -450,9 +401,23 @@ app.post('/elimina-catalogo', async (req, res) => {
 });
 
 // ============================================================
-//  PRATICHE
+//  PRATICHE — CRUD COMPLETO
+//  Colonne foglio "Pratiche" (20 colonne, A→T):
+//  A=ID | B=IDIntervento | C=CodiceImpianto | D=Stato |
+//  E=DataRichiesta | F=NoteRichiesta | G=LinkRichiesta |
+//  H=DataPreventivo | I=ImportoPreventivo | J=LinkPreventivo |
+//  K=DataBdo | L=NumeroBdo | M=LinkBdo |
+//  N=DataDdt | O=NumeroDdt | P=LinkDdt |
+//  Q=DataChiusura | R=NoteChiusura | S=CreatoIl | T=InGestione
+//
+//  Stato iter: Richiesta → Offerta → Preventivo → BdO → DDT → Chiusa
+//  InGestione=SI bypassa il preventivo
+//  Gli interventi di realizzazione sono nel foglio Interventi con
+//  note contenente [PRA:ID] come riferimento alla pratica
+//  Le offerte sono gestite nel foglio separato "Offerte"
 // ============================================================
 
+// GET /pratiche
 app.get('/pratiche', async (req, res) => {
   try {
     const sheets   = await getSheets();
@@ -483,6 +448,7 @@ app.get('/pratiche', async (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
 
+// POST /crea-pratica
 app.post('/crea-pratica', async (req, res) => {
   try {
     const { idIntervento, codiceImpianto, noteRichiesta, linkRichiesta } = req.body;
@@ -497,18 +463,19 @@ app.post('/crea-pratica', async (req, res) => {
       requestBody: { values: [[
         id, idIntervento||'', codiceImpianto, 'Richiesta',
         dataOggi, noteRichiesta||'', linkRichiesta||'',
-        '', '', '',
-        '', '', '',
-        '', '', '',
-        '', '',
-        oggi,
-        'NO',
+        '', '', '',   // preventivo
+        '', '', '',   // bdo
+        '', '', '',   // ddt
+        '', '',       // chiusura
+        oggi,         // creatoIl
+        'NO',         // inGestione
       ]] },
     });
     res.json({ ok: true, id });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
 
+// POST /aggiorna-pratica
 app.post('/aggiorna-pratica', async (req, res) => {
   try {
     const { id, step, dati } = req.body;
@@ -518,6 +485,7 @@ app.post('/aggiorna-pratica', async (req, res) => {
     if (idx < 1) return res.json({ ok: false, errore: 'Pratica non trovata' });
 
     const STATI = ['Richiesta','Offerta','Preventivo','BdO','DDT','Chiusa'];
+
     const stepMap = {
       richiesta:  { range: `${SH.PRATICHE}!E${idx+1}:G${idx+1}`, fields: ['dataRichiesta','noteRichiesta','linkRichiesta'],      statoNew: 'Richiesta' },
       preventivo: { range: `${SH.PRATICHE}!H${idx+1}:J${idx+1}`, fields: ['dataPreventivo','importoPreventivo','linkPreventivo'], statoNew: 'Preventivo' },
@@ -535,6 +503,7 @@ app.post('/aggiorna-pratica', async (req, res) => {
       valueInputOption: 'RAW', requestBody: { values: [values] },
     });
 
+    // Avanza stato solo in avanti
     const statoAttuale = rows[idx][3] || 'Richiesta';
     const idxAtt = STATI.indexOf(statoAttuale);
     const idxNuo = STATI.indexOf(s.statoNew);
@@ -548,6 +517,7 @@ app.post('/aggiorna-pratica', async (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
 
+// POST /avanza-stato-offerta — porta pratica in stato "Offerta" quando si aggiunge la prima offerta
 app.post('/avanza-stato-offerta', async (req, res) => {
   try {
     const { id } = req.body;
@@ -567,17 +537,20 @@ app.post('/avanza-stato-offerta', async (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
 
+// POST /imposta-gestione — segna pratica come "in gestione" e avanza a BdO
 app.post('/imposta-gestione', async (req, res) => {
   try {
-    const { id, valore } = req.body;
+    const { id, valore } = req.body; // valore: true/false
     const sheets = await getSheets();
     const rows   = await leggi(sheets, SH.PRATICHE);
     const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
     if (idx < 1) return res.json({ ok: false, errore: 'Pratica non trovata' });
+    // Salva flag in colonna T (indice 19)
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID, range: `${SH.PRATICHE}!T${idx+1}`,
       valueInputOption: 'RAW', requestBody: { values: [[valore ? 'SI' : 'NO']] },
     });
+    // Se attivato, avanza stato a BdO (salta Preventivo)
     if (valore) {
       const STATI = ['Richiesta','Offerta','Preventivo','BdO','DDT','Chiusa'];
       const statoAtt = rows[idx][3] || 'Richiesta';
@@ -592,6 +565,7 @@ app.post('/imposta-gestione', async (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
 
+// POST /elimina-pratica
 app.post('/elimina-pratica', async (req, res) => {
   try {
     const { id } = req.body;
@@ -604,6 +578,7 @@ app.post('/elimina-pratica', async (req, res) => {
         requestBody: { requests: [{ deleteDimension: { range: { sheetId: await getSheetId(sheets, SH.PRATICHE), dimension:'ROWS', startIndex:idx, endIndex:idx+1 } } }] },
       });
     }
+    // Elimina anche le offerte collegate
     const rOff = await leggi(sheets, SH.OFFERTE).catch(() => []);
     const idxOff = rOff.map((r,i)=>i).filter(i=>i>0&&rOff[i][1]===id).reverse();
     for (const io of idxOff) {
@@ -617,9 +592,12 @@ app.post('/elimina-pratica', async (req, res) => {
 });
 
 // ============================================================
-//  OFFERTE
+//  OFFERTE — foglio separato
+//  Colonne: A=ID | B=IDPratica | C=Fornitore | D=Descrizione |
+//           E=Importo | F=Data | G=LinkDrive | H=Selezionata | I=Note
 // ============================================================
 
+// GET /offerte?idPratica=PRA-XXX
 app.get('/offerte', async (req, res) => {
   try {
     const { idPratica } = req.query;
@@ -640,6 +618,7 @@ app.get('/offerte', async (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
 
+// POST /crea-offerta
 app.post('/crea-offerta', async (req, res) => {
   try {
     const { idPratica, fornitore, descrizione, importo, data, linkDrive, note } = req.body;
@@ -652,6 +631,7 @@ app.post('/crea-offerta', async (req, res) => {
       valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
       requestBody: { values: [[id, idPratica, fornitore, descrizione||'', importo||'', oggi, linkDrive||'', 'NO', note||'']] },
     });
+    // Porta pratica in stato Offerta se era ancora in Richiesta
     const rows = await leggi(sheets, SH.PRATICHE);
     const idx  = rows.findIndex((r,i) => i > 0 && r[0] === idPratica);
     if (idx > 0) {
@@ -668,6 +648,8 @@ app.post('/crea-offerta', async (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
 
+// POST /seleziona-offerta — seleziona o deseleziona un'offerta
+// id: ID offerta da selezionare, oppure null per deselezionare tutte
 app.post('/seleziona-offerta', async (req, res) => {
   try {
     const { id, idPratica } = req.body;
@@ -686,6 +668,7 @@ app.post('/seleziona-offerta', async (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
 
+// POST /elimina-offerta
 app.post('/elimina-offerta', async (req, res) => {
   try {
     const { id } = req.body;
@@ -703,9 +686,8 @@ app.post('/elimina-offerta', async (req, res) => {
 });
 
 // ============================================================
-//  RDACAT
+//  GET /rdacat / POST /crea-rdacat / POST /aggiorna-rdacat / POST /elimina-rdacat
 // ============================================================
-
 app.get('/rdacat', async (req, res) => {
   try {
     const sheets = await getSheets();
@@ -755,7 +737,6 @@ app.post('/elimina-rdacat', async (req, res) => {
 // ============================================================
 //  REPERIBILITA
 // ============================================================
-
 app.get('/reperibile', async (req, res) => {
   try {
     const sheets = await getSheets();
@@ -816,68 +797,6 @@ app.post('/aggiorna-multigiorno', async (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
 
-// ============================================================
-//  SEGNALAZIONI PESARO
-// ============================================================
-
-app.get('/segnalazioni/stats', async (req, res) => {
-  try {
-    const sheets = await getSheets();
-    const rows   = await leggiSegnalazioni(sheets);
-    const stats  = aggregaSegnalazioni(rows.filter(r => r && r[0]));
-    res.json(stats);
-  } catch (err) {
-    console.error('[segnalazioni/stats]', err.message);
-    res.status(500).json({ ok: false, errore: err.message });
-  }
-});
-
-app.get('/segnalazioni/raw', async (req, res) => {
-  try {
-    const { codiceK, priorita, tipologia, da, a } = req.query;
-    const dateFrom = da ? new Date(da) : null;
-    const dateTo   = a  ? new Date(a)  : null;
-
-    const sheets = await getSheets();
-    let rows     = (await leggiSegnalazioni(sheets)).filter(r => r && r[0]);
-
-    if (codiceK)   rows = rows.filter(r => String(r[5]).trim().toUpperCase() === codiceK.toUpperCase());
-    if (priorita)  rows = rows.filter(r => String(r[7]).trim().toLowerCase() === priorita.toLowerCase());
-    if (tipologia) rows = rows.filter(r => String(r[8]).toLowerCase().includes(tipologia.toLowerCase()));
-    if (dateFrom || dateTo) {
-      rows = rows.filter(r => {
-        const d = segToDate(String(r[1]));
-        if (!d) return false;
-        if (dateFrom && d < dateFrom) return false;
-        if (dateTo   && d > dateTo)   return false;
-        return true;
-      });
-    }
-
-    const mapped = rows.map(r => ({
-      id_fmp:      r[0],
-      data:        r[1],
-      ora:         r[2],
-      richiedente: r[3],
-      telefono:    r[4],
-      codiceK:     r[5],
-      nome:        r[6],
-      priorita:    r[7],
-      tipologia:   r[8],
-      descrizione: r[9],
-    }));
-
-    res.json({ rows: mapped, total: mapped.length });
-  } catch (err) {
-    console.error('[segnalazioni/raw]', err.message);
-    res.status(500).json({ ok: false, errore: err.message });
-  }
-});
-
-// ============================================================
-//  UTILITY
-// ============================================================
-
 async function getSheetId(sheets, name) {
   const meta  = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
   const sheet = meta.data.sheets.find(s => s.properties.title === name);
@@ -885,7 +804,306 @@ async function getSheetId(sheets, name) {
   return sheet.properties.sheetId;
 }
 
+// GET /preventivi — stub per compatibilità con client vecchi
 app.get('/preventivi', (req, res) => res.json({ preventivi: [] }));
 app.post('/richiedi-preventivo', (req, res) => res.json({ ok: true, id: 'PREV-' + Math.random().toString(36).substring(2,10).toUpperCase() }));
+
+// ============================================================
+//  PRESENZE GPS
+//  Foglio Presenze: A=ID | B=Operaio | C=Data | D=Ora | E=Tipo
+//                  F=Lat | G=Lon | H=ImpiantoPiuVicino | I=DistanzaKm | J=FuoriRaggio
+// ============================================================
+
+function distKm(lat1, lon1, lat2, lon2) {
+  if (!lat1||!lon1||!lat2||!lon2) return 9999;
+  const R = 6371;
+  const dLat = (lat2-lat1)*Math.PI/180;
+  const dLon = (lon2-lon1)*Math.PI/180;
+  const a = Math.sin(dLat/2)**2 +
+            Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+app.post('/registra-presenza', async (req, res) => {
+  try {
+    const { operaio, lat, lon, tipo } = req.body;
+    // tipo: 'Arrivo' | 'Pausa' | 'Rientro' | 'Uscita'
+    if (!operaio || lat == null || lon == null || !tipo)
+      return res.json({ ok: false, errore: 'Parametri mancanti' });
+
+    const sheets  = await getSheets();
+    const oggi    = new Date();
+    const dataStr = oggi.toISOString().slice(0,10);
+    const oraStr  = oggi.toLocaleTimeString('it-IT', { hour:'2-digit', minute:'2-digit' });
+    const id      = 'PRE-' + Math.random().toString(36).substring(2,10).toUpperCase();
+
+    // Trova impianto più vicino tra quelli dell'operaio oggi
+    const rInt = await leggi(sheets, SH.INTERVENTI);
+    const rImp = await leggi(sheets, SH.IMPIANTI);
+
+    // Impianti del giorno per questo operaio
+    const impiantiOggi = rInt.slice(1).filter(r =>
+      r[3] === operaio && r[2] && r[2].toString().slice(0,10) === dataStr
+    ).map(r => r[1]); // codici impianto
+
+    // Cerca coordinate impianti nel foglio Impianti (col F=Lat G=Lon se presenti)
+    let impiantoPiuVicino = '', distanzaMin = 9999;
+    rImp.slice(1).forEach(r => {
+      const codice = r[0] ? r[0].toString().trim() : '';
+      if (!impiantiOggi.includes(codice)) return;
+      const iLat = parseFloat(r[5]);
+      const iLon = parseFloat(r[6]);
+      if (isNaN(iLat) || isNaN(iLon)) return;
+      const d = distKm(parseFloat(lat), parseFloat(lon), iLat, iLon);
+      if (d < distanzaMin) { distanzaMin = d; impiantoPiuVicino = codice; }
+    });
+
+    const fuoriRaggio = distanzaMin > 2 && impiantoPiuVicino !== '';
+    const distStr     = distanzaMin < 9999 ? distanzaMin.toFixed(2) : '';
+
+    // Salva nel foglio Presenze
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID, range: SH.PRESENZE,
+      valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [[
+        id, operaio, dataStr, oraStr, tipo,
+        lat, lon, impiantoPiuVicino, distStr,
+        fuoriRaggio ? 'SI' : 'NO'
+      ]] },
+    });
+
+    // Se fuori raggio e tipo Arrivo/Rientro → notifica al responsabile
+    if (fuoriRaggio && (tipo === 'Arrivo' || tipo === 'Rientro')) {
+      const nomeImp = rImp.slice(1).find(r => r[0] === impiantoPiuVicino);
+      const descImp = nomeImp ? nomeImp[1] : impiantoPiuVicino;
+      await pushNotifica(sheets, ['1234'], // PIN responsabile come identificativo
+        `⚠️ ${operaio} fuori raggio`,
+        `${tipo} · ${oraStr} · ${distanzaMin.toFixed(1)}km da ${descImp}`
+      ).catch(e => console.warn('Push responsabile fallita:', e.message));
+    }
+
+    res.json({ ok: true, id, distanzaKm: distStr, fuoriRaggio, impiantoPiuVicino });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// GET /presenze?operaio=Matteo&data=2026-05-01
+app.get('/presenze', async (req, res) => {
+  try {
+    const { operaio, data } = req.query;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.PRESENZE).catch(() => []);
+    const presenze = rows.slice(1).filter(r =>
+      r[0] &&
+      (!operaio || r[1] === operaio) &&
+      (!data    || r[2] === data)
+    ).map(r => ({
+      id: r[0]||'', operaio: r[1]||'', data: r[2]||'', ora: r[3]||'',
+      tipo: r[4]||'', lat: r[5]||'', lon: r[6]||'',
+      impiantoPiuVicino: r[7]||'', distanzaKm: r[8]||'',
+      fuoriRaggio: r[9]==='SI',
+    }));
+    res.json({ presenze });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// ============================================================
+//  OWNTRACKS RECEIVER
+//  OwnTracks manda POST con payload JSON tipo:
+//  { "_type":"location", "tid":"Matteo", "lat":43.9, "lon":12.9,
+//    "tst":1234567890, "acc":10, "batt":80 }
+//  tid = Device ID impostato nell'app = nome operaio
+// ============================================================
+
+const ORARI_PRESENZA_OT = [
+  { ora: '07:30', tipo: 'Arrivo' },
+  { ora: '12:30', tipo: 'Pausa' },
+  { ora: '13:30', tipo: 'Rientro' },
+  { ora: '16:30', tipo: 'Uscita' },
+];
+const TOLLERANZA_MIN_OT = 5; // ±5 minuti dall'orario target
+
+// ── Endpoint test OwnTracks — verifica connessione e ultimo payload ricevuto
+// Chiamata: GET /owntracks-test
+// Rimuovere dopo il collaudo
+let _ultimoPayloadOT = null;
+app.get('/owntracks-test', (req, res) => {
+  res.json({
+    ok: true,
+    messaggio: 'Endpoint OwnTracks attivo',
+    orarioServer: new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' }),
+    orariRilevamento: ORARI_PRESENZA_OT.map(o => o.ora + ' → ' + o.tipo),
+    tolleranzaMinuti: TOLLERANZA_MIN_OT,
+    ultimoPayload: _ultimoPayloadOT,
+  });
+});
+
+function orarioItalia(date) {
+  return date.toLocaleTimeString('it-IT', {
+    hour: '2-digit', minute: '2-digit',
+    timeZone: 'Europe/Rome'
+  });
+}
+
+function dataItalia(date) {
+  return date.toLocaleDateString('it-IT', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    timeZone: 'Europe/Rome'
+  }).split('/').reverse().join('-'); // → yyyy-MM-dd
+}
+
+function minDiff(ora1, ora2) {
+  // Differenza in minuti tra due orari HH:MM
+  const [h1, m1] = ora1.split(':').map(Number);
+  const [h2, m2] = ora2.split(':').map(Number);
+  return Math.abs((h1*60+m1) - (h2*60+m2));
+}
+
+app.post('/owntracks', async (req, res) => {
+  try {
+    const payload = req.body;
+    _ultimoPayloadOT = { ...payload, _ricevutoAlle: new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' }) };
+
+    // OwnTracks manda vari tipi — interessa solo "location"
+    if (!payload || payload._type !== 'location') {
+      return res.json({ ok: true }); // risponde ok per non far retry
+    }
+
+    const operaio = payload.tid; // Device ID = nome operaio
+    const lat     = payload.lat;
+    const lon     = payload.lon;
+
+    if (!operaio || lat == null || lon == null) {
+      return res.json({ ok: false, errore: 'Dati mancanti' });
+    }
+
+    // Calcola orario attuale in Italia
+    const now    = new Date();
+    const oraOra = orarioItalia(now); // es. "07:31"
+
+    // Controlla se siamo vicini a uno degli orari target
+    const match = ORARI_PRESENZA_OT.find(o => minDiff(oraOra, o.ora) <= TOLLERANZA_MIN_OT);
+    if (!match) {
+      // Non è un orario di rilevamento — registra comunque ma senza tipo specifico
+      // (utile per debug, non va nel foglio Presenze)
+      console.log(`[OwnTracks] ${operaio} @ ${oraOra} — fuori finestra orari`);
+      return res.json({ ok: true, registrato: false });
+    }
+
+    const tipo    = match.tipo;
+    const dataStr = dataItalia(now);
+    const oraStr  = oraOra;
+
+    // Controlla se questo tipo è già stato registrato oggi per questo operaio
+    const sheets = await getSheets();
+    const rPres  = await leggi(sheets, SH.PRESENZE).catch(() => []);
+    const giaReg = rPres.slice(1).some(r =>
+      r[1] === operaio && r[2] === dataStr && r[4] === tipo
+    );
+
+    if (giaReg) {
+      console.log(`[OwnTracks] ${operaio} ${tipo} già registrato oggi`);
+      return res.json({ ok: true, registrato: false, motivo: 'gia_registrato' });
+    }
+
+    // Trova impianto più vicino tra quelli in programma oggi per questo operaio
+    const rInt = await leggi(sheets, SH.INTERVENTI);
+    const rImp = await leggi(sheets, SH.IMPIANTI);
+
+    const impiantiOggi = rInt.slice(1)
+      .filter(r => r[3] === operaio && r[2] && r[2].toString().slice(0,10) === dataStr)
+      .map(r => r[1]);
+
+    let impiantoPiuVicino = '', distanzaMin = 9999;
+    rImp.slice(1).forEach(r => {
+      const codice = r[0] ? r[0].toString().trim() : '';
+      if (!impiantiOggi.includes(codice)) return;
+      const iLat = parseFloat(r[5]);
+      const iLon = parseFloat(r[6]);
+      if (isNaN(iLat) || isNaN(iLon)) return;
+      const d = distKm(parseFloat(lat), parseFloat(lon), iLat, iLon);
+      if (d < distanzaMin) { distanzaMin = d; impiantoPiuVicino = codice; }
+    });
+
+    const fuoriRaggio = distanzaMin > 2 && impiantoPiuVicino !== '';
+    const distStr     = distanzaMin < 9999 ? distanzaMin.toFixed(2) : '';
+    const id          = 'PRE-' + Math.random().toString(36).substring(2,10).toUpperCase();
+
+    // Salva nel foglio Presenze
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID, range: SH.PRESENZE,
+      valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [[
+        id, operaio, dataStr, oraStr, tipo,
+        lat, lon, impiantoPiuVicino, distStr,
+        fuoriRaggio ? 'SI' : 'NO'
+      ]] },
+    });
+
+    console.log(`[OwnTracks] ✓ ${operaio} ${tipo} @ ${oraStr} — fuoriRaggio:${fuoriRaggio}`);
+
+    // Notifica responsabile se fuori raggio
+    if (fuoriRaggio && (tipo === 'Arrivo' || tipo === 'Rientro')) {
+      const impRow  = rImp.slice(1).find(r => r[0] === impiantoPiuVicino);
+      const descImp = impRow ? impRow[1] : impiantoPiuVicino;
+      await pushNotifica(sheets, ['Responsabile'],
+        `⚠️ ${operaio} fuori raggio`,
+        `${tipo} · ${oraStr} · ${parseFloat(distStr).toFixed(1)}km da ${descImp}`
+      ).catch(e => console.warn('Push responsabile:', e.message));
+    }
+
+    // OwnTracks si aspetta risposta vuota o array vuoto
+    res.json([]);
+
+  } catch (err) {
+    console.error('[OwnTracks] Errore:', err.message);
+    res.json([]); // risponde comunque per non far retry infiniti
+  }
+});
+
+// ── Endpoint test presenza — forza registrazione ignorando orario
+// POST /test-presenza  body: { operaio, lat, lon, tipo }
+// RIMUOVERE DOPO IL COLLAUDO
+app.post('/test-presenza', async (req, res) => {
+  try {
+    const { operaio, lat, lon, tipo } = req.body;
+    if (!operaio || lat == null || lon == null || !tipo)
+      return res.json({ ok: false, errore: 'Parametri: operaio, lat, lon, tipo' });
+
+    const sheets  = await getSheets();
+    const now     = new Date();
+    const dataStr = dataItalia(now);
+    const oraStr  = orarioItalia(now);
+    const id      = 'PRE-' + Math.random().toString(36).substring(2,10).toUpperCase();
+
+    // Trova impianto più vicino
+    const rInt = await leggi(sheets, SH.INTERVENTI);
+    const rImp = await leggi(sheets, SH.IMPIANTI);
+    const impiantiOggi = rInt.slice(1)
+      .filter(r => r[3] === operaio && r[2] && r[2].toString().slice(0,10) === dataStr)
+      .map(r => r[1]);
+
+    let impiantoPiuVicino = '', distanzaMin = 9999;
+    rImp.slice(1).forEach(r => {
+      const codice = r[0] ? r[0].toString().trim() : '';
+      if (!impiantiOggi.includes(codice)) return;
+      const iLat = parseFloat(r[5]), iLon = parseFloat(r[6]);
+      if (isNaN(iLat) || isNaN(iLon)) return;
+      const d = distKm(parseFloat(lat), parseFloat(lon), iLat, iLon);
+      if (d < distanzaMin) { distanzaMin = d; impiantoPiuVicino = codice; }
+    });
+
+    const fuoriRaggio = distanzaMin > 2 && impiantoPiuVicino !== '';
+    const distStr     = distanzaMin < 9999 ? distanzaMin.toFixed(2) : '';
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID, range: SH.PRESENZE,
+      valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [[id, operaio, dataStr, oraStr, tipo + '(TEST)',
+        lat, lon, impiantoPiuVicino, distStr, fuoriRaggio ? 'SI' : 'NO']] },
+    });
+
+    res.json({ ok: true, id, dataStr, oraStr, tipo, impiantoPiuVicino, distanzaKm: distStr, fuoriRaggio });
+  } catch(err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
 
 app.listen(PORT, () => console.log(`Siram Proxy attivo sulla porta ${PORT}`));
