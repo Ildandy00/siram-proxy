@@ -811,7 +811,7 @@ app.post('/richiedi-preventivo', (req, res) => res.json({ ok: true, id: 'PREV-' 
 // ============================================================
 //  PRESENZE GPS
 //  Foglio Presenze: A=ID | B=Operaio | C=Data | D=Ora | E=Tipo
-//                  F=Lat | G=Lon | H=ImpiantoPiuVicino | I=DistanzaKm | J=FuoriRaggio
+//                  F=Lat | G=Lon | H=ImpiantoPiuVicino | I=DistanzaKm | J=FuoriRaggio | K=LinkGMaps
 // ============================================================
 
 function distKm(lat1, lon1, lat2, lon2) {
@@ -862,17 +862,16 @@ app.post('/registra-presenza', async (req, res) => {
     const distStr     = distanzaMin < 9999 ? distanzaMin.toFixed(2) : '';
 
     // Salva nel foglio Presenze
+    const gmapsLink = `https://maps.google.com/?q=${lat},${lon}`;
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID, range: SH.PRESENZE,
       valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
       requestBody: { values: [[
         id, operaio, dataStr, oraStr, tipo,
         lat, lon, impiantoPiuVicino, distStr,
-        fuoriRaggio ? 'SI' : 'NO'
+        fuoriRaggio ? 'SI' : 'NO', gmapsLink
       ]] },
     });
-
-    // Se fuori raggio e tipo Arrivo/Rientro → notifica al responsabile
     if (fuoriRaggio && (tipo === 'Arrivo' || tipo === 'Rientro')) {
       const nomeImp = rImp.slice(1).find(r => r[0] === impiantoPiuVicino);
       const descImp = nomeImp ? nomeImp[1] : impiantoPiuVicino;
@@ -1051,13 +1050,14 @@ app.post('/owntracks', async (req, res) => {
     const id          = 'PRE-' + Math.random().toString(36).substring(2,10).toUpperCase();
 
     // Salva nel foglio Presenze
+    const gmapsLinkOT = `https://maps.google.com/?q=${lat},${lon}`;
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID, range: SH.PRESENZE,
       valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
       requestBody: { values: [[
         id, operaio, dataStr, oraStr, tipo,
         lat, lon, impiantoPiuVicino, distStr,
-        fuoriRaggio ? 'SI' : 'NO'
+        fuoriRaggio ? 'SI' : 'NO', gmapsLinkOT
       ]] },
     });
 
@@ -1117,11 +1117,12 @@ app.post('/test-presenza', async (req, res) => {
     const fuoriRaggio = distanzaMin > 2 && impiantoPiuVicino !== '';
     const distStr     = distanzaMin < 9999 ? distanzaMin.toFixed(2) : '';
 
+    const gmapsLinkTest = `https://maps.google.com/?q=${lat},${lon}`;
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID, range: SH.PRESENZE,
       valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
       requestBody: { values: [[id, operaio, dataStr, oraStr, tipo + '(TEST)',
-        lat, lon, impiantoPiuVicino, distStr, fuoriRaggio ? 'SI' : 'NO']] },
+        lat, lon, impiantoPiuVicino, distStr, fuoriRaggio ? 'SI' : 'NO', gmapsLinkTest]] },
     });
 
     res.json({ ok: true, id, dataStr, oraStr, tipo, impiantoPiuVicino, distanzaKm: distStr, fuoriRaggio });
