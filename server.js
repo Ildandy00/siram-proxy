@@ -1085,6 +1085,63 @@ app.post('/owntracks', async (req, res) => {
 // ── Endpoint test presenza — forza registrazione ignorando orario
 // POST /test-presenza  body: { operaio, lat, lon, tipo }
 // RIMUOVERE DOPO IL COLLAUDO
+// GET /test-presenza-tutti — registra posizione attuale di tutti gli operai tracciati
+// RIMUOVERE DOPO IL COLLAUDO
+app.get('/test-presenza-tutti', async (req, res) => {
+  try {
+    if (!Object.keys(_payloadPerUtente).length)
+      return res.json({ ok: false, errore: 'Nessuna posizione in memoria — fai inviare la posizione da OwnTracks prima' });
+
+    const sheets  = await getSheets();
+    const now     = new Date();
+    const dataStr = dataItalia(now);
+    const oraStr  = orarioItalia(now);
+    const tipo    = req.query.tipo || 'Test';
+    const rInt    = await leggi(sheets, SH.INTERVENTI);
+    const rImp    = await leggi(sheets, SH.IMPIANTI);
+    const risultati = [];
+
+    for (const [operaio, pos] of Object.entries(_payloadPerUtente)) {
+      const lat = pos.lat;
+      const lon = pos.lon;
+      const id  = 'PRE-' + Math.random().toString(36).substring(2,10).toUpperCase();
+
+      // Trova impianto più vicino
+      const impiantiOggi = rInt.slice(1)
+        .filter(r => r[3] === operaio && r[2] && r[2].toString().slice(0,10) === dataStr)
+        .map(r => r[1]);
+
+      let impiantoPiuVicino = '', distanzaMin = 9999;
+      rImp.slice(1).forEach(r => {
+        const codice = r[0] ? r[0].toString().trim() : '';
+        if (!impiantiOggi.includes(codice)) return;
+        const iLat = parseFloat(r[5]), iLon = parseFloat(r[6]);
+        if (isNaN(iLat) || isNaN(iLon)) return;
+        const d = distKm(parseFloat(lat), parseFloat(lon), iLat, iLon);
+        if (d < distanzaMin) { distanzaMin = d; impiantoPiuVicino = codice; }
+      });
+
+      const fuoriRaggio   = distanzaMin > 2 && impiantoPiuVicino !== '';
+      const distStr       = distanzaMin < 9999 ? distanzaMin.toFixed(2) : '';
+      const gmapsLink     = `https://maps.google.com/?q=${lat},${lon}`;
+
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SHEET_ID, range: SH.PRESENZE,
+        valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: [[
+          id, operaio, dataStr, oraStr, tipo + '(TEST)',
+          lat, lon, impiantoPiuVicino, distStr,
+          fuoriRaggio ? 'SI' : 'NO', gmapsLink
+        ]] },
+      });
+
+      risultati.push({ operaio, lat, lon, tipo, impiantoPiuVicino, distanzaKm: distStr, fuoriRaggio, gmapsLink, ora: pos.ora });
+    }
+
+    res.json({ ok: true, registrati: risultati.length, risultati });
+  } catch(err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
 app.post('/test-presenza', async (req, res) => {
   try {
     const { operaio, lat, lon, tipo } = req.body;
