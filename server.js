@@ -919,6 +919,7 @@ const ORARI_PRESENZA_OT = [
   { ora: '12:30', tipo: 'Pausa' },
   { ora: '13:30', tipo: 'Rientro' },
   { ora: '16:30', tipo: 'Uscita' },
+  { ora: '18:00', tipo: 'Uscita' },
 ];
 const TOLLERANZA_MIN_OT = 5; // ±5 minuti dall'orario target
 
@@ -1006,10 +1007,8 @@ app.post('/owntracks', async (req, res) => {
     console.log(`[OwnTracks] ricevuto da topic:${payload.topic} → operaio:${operaio} @ ${oraOra}`);
     const match = ORARI_PRESENZA_OT.find(o => minDiff(oraOra, o.ora) <= TOLLERANZA_MIN_OT);
     if (!match) {
-      // Non è un orario di rilevamento — registra comunque ma senza tipo specifico
-      // (utile per debug, non va nel foglio Presenze)
       console.log(`[OwnTracks] ${operaio} @ ${oraOra} — fuori finestra orari`);
-      return res.json({ ok: true, registrato: false });
+      return res.json([]); // OwnTracks si aspetta array vuoto
     }
 
     const tipo    = match.tipo;
@@ -1025,7 +1024,7 @@ app.post('/owntracks', async (req, res) => {
 
     if (giaReg) {
       console.log(`[OwnTracks] ${operaio} ${tipo} già registrato oggi`);
-      return res.json({ ok: true, registrato: false, motivo: 'gia_registrato' });
+      return res.json([]); // OwnTracks si aspetta array vuoto
     }
 
     // Trova impianto più vicino tra quelli in programma oggi per questo operaio
