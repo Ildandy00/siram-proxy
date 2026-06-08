@@ -926,6 +926,8 @@ const TOLLERANZA_MIN_OT = 5; // ±5 minuti dall'orario target
 // Chiamata: GET /owntracks-test
 // Rimuovere dopo il collaudo
 let _ultimoPayloadOT = null;
+let _payloadPerUtente = {}; // { 'Davide': {...}, 'Marta': {...} }
+
 app.get('/owntracks-test', (req, res) => {
   res.json({
     ok: true,
@@ -934,6 +936,15 @@ app.get('/owntracks-test', (req, res) => {
     orariRilevamento: ORARI_PRESENZA_OT.map(o => o.ora + ' → ' + o.tipo),
     tolleranzaMinuti: TOLLERANZA_MIN_OT,
     ultimoPayload: _ultimoPayloadOT,
+    perUtente: Object.fromEntries(
+      Object.entries(_payloadPerUtente).map(([nome, p]) => [nome, {
+        ora: p._ricevutoAlle,
+        lat: p.lat,
+        lon: p.lon,
+        batteria: p.batt + '%',
+        gmaps: `https://maps.google.com/?q=${p.lat},${p.lon}`,
+      }])
+    ),
   });
 });
 
@@ -962,6 +973,10 @@ app.post('/owntracks', async (req, res) => {
   try {
     const payload = req.body;
     _ultimoPayloadOT = { ...payload, _ricevutoAlle: new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' }) };
+
+    // Salva anche per utente specifico (ricava nome dal topic)
+    const nomeTemp = payload.topic ? payload.topic.split('/')[1] : payload.tid;
+    if (nomeTemp) _payloadPerUtente[nomeTemp] = _ultimoPayloadOT;
 
     // OwnTracks manda vari tipi — interessa solo "location"
     if (!payload || payload._type !== 'location') {
