@@ -1142,6 +1142,118 @@ app.get('/test-presenza-tutti', async (req, res) => {
   } catch(err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
 
+// ============================================================
+//  GPSLOGGER RECEIVER
+//  GPSLogger invia GET con parametri nell'URL:
+//  /gpslogger?lat=43.9&lon=12.8&operaio=Matteo&batt=80&acc=10
+// ============================================================
+
+let _payloadGPSLogger = {}; // { 'Matteo': { lat, lon, batt, acc, ora } }
+
+app.get('/gpslogger', async (req, res) => {
+  try {
+    const { lat, lon, operaio, batt, acc } = req.query;
+
+    if (!operaio || lat == null || lon == null)
+      return res.send('ok'); // GPSLogger si aspetta risposta testuale semplice
+
+    const now    = new Date();
+    const oraOra = orarioItalia(now);
+
+    // Salva ultima posizione per utente
+    _payloadGPSLogger[operaio] = {
+      lat: parseFloat(lat), lon: parseFloat(lon),
+      batt: batt || '?', acc: acc || '?',
+      ora: now.toLocaleString('it-IT', { timeZone: 'Europe/Rome' }),
+    };
+    // Aggiorna anche _payloadPerUtente per compatibilità con test-presenza-tutti
+    _payloadPerUtente[operaio] = _payloadGPSLogger[operaio];
+
+    console.log(`[GPSLogger] ${operaio} @ ${oraOra} lat:${lat} lon:${lon} batt:${batt}%`);
+
+    // Controlla se è un orario di rilevamento
+    const match = ORARI_PRESENZA_OT.find(o => minDiff(oraOra, o.ora) <= TOLLERANZA_MIN_OT);
+    if (!match) return res.send('ok'); // fuori finestra — solo aggiorna posizione
+
+    const tipo    = match.tipo;
+    const dataStr = dataItalia(now);
+    const oraStr  = oraOra;
+
+    // Anti-duplicato
+    const sheets = await getSheets();
+    const rPres  = await leggi(sheets, SH.PRESENZE).catch(() => []);
+    const giaReg = rPres.slice(1).some(r =>
+      r[1] === operaio && r[2] === dataStr && r[4] === tipo
+    );
+    if (giaReg) { console.log(`[GPSLogger] ${operaio} ${tipo} già registrato`); return res.send('ok'); }
+
+    // Trova impianto più vicino
+    const rInt = await leggi(sheets, SH.INTERVENTI);
+    const rImp = await leggi(sheets, SH.IMPIANTI);
+    const impiantiOggi = rInt.slice(1)
+      .filter(r => r[3] === operaio && r[2] && r[2].toString().slice(0,10) === dataStr)
+      .map(r => r[1]);
+
+    let impiantoPiuVicino = '', distanzaMin = 9999;
+    rImp.slice(1).forEach(r => {
+      const codice = r[0] ? r[0].toString().trim() : '';
+      if (!impiantiOggi.includes(codice)) return;
+      const iLat = parseFloat(r[5]), iLon = parseFloat(r[6]);
+      if (isNaN(iLat) || isNaN(iLon)) return;
+      const d = distKm(parseFloat(lat), parseFloat(lon), iLat, iLon);
+      if (d < distanzaMin) { distanzaMin = d; impiantoPiuVicino = codice; }
+    });
+
+    const fuoriRaggio = distanzaMin > 2 && impiantoPiuVicino !== '';
+    const distStr     = distanzaMin < 9999 ? distanzaMin.toFixed(2) : '';
+    const gmapsLink   = `https://maps.google.com/?q=${lat},${lon}`;
+    const id          = 'PRE-' + Math.random().toString(36).substring(2,10).toUpperCase();
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID, range: SH.PRESENZE,
+      valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [[
+        id, operaio, dataStr, oraStr, tipo,
+        lat, lon, impiantoPiuVicino, distStr,
+        fuoriRaggio ? 'SI' : 'NO', gmapsLink
+      ]] },
+    });
+
+    console.log(`[GPSLogger] ✓ ${operaio} ${tipo} @ ${oraStr} — fuoriRaggio:${fuoriRaggio}`);
+
+    if (fuoriRaggio && (tipo === 'Arrivo' || tipo === 'Rientro')) {
+      const impRow  = rImp.slice(1).find(r => r[0] === impiantoPiuVicino);
+      const descImp = impRow ? impRow[1] : impiantoPiuVicino;
+      await pushNotifica(sheets, ['Responsabile'],
+        `⚠️ ${operaio} fuori raggio`,
+        `${tipo} · ${oraStr} · ${parseFloat(distStr).toFixed(1)}km da ${descImp}`
+      ).catch(() => {});
+    }
+
+    res.send('ok');
+  } catch(err) {
+    console.error('[GPSLogger] Errore:', err.message);
+    res.send('ok'); // risponde sempre ok per non bloccare GPSLogger
+  }
+});
+
+// GET /gpslogger-test — stato attuale di tutti gli operai tracciati via GPSLogger
+app.get('/gpslogger-test', (req, res) => {
+  res.json({
+    ok: true,
+    orarioServer: new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' }),
+    operaiTracciati: Object.keys(_payloadGPSLogger).length,
+    perUtente: Object.fromEntries(
+      Object.entries(_payloadGPSLogger).map(([nome, p]) => [nome, {
+        ora: p.ora, lat: p.lat, lon: p.lon,
+        batteria: p.batt + '%',
+        accuratezza: p.acc + 'm',
+        gmaps: `https://maps.google.com/?q=${p.lat},${p.lon}`,
+      }])
+    ),
+  });
+});
+
 app.post('/test-presenza', async (req, res) => {
   try {
     const { operaio, lat, lon, tipo } = req.body;
