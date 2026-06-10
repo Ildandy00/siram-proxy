@@ -32,18 +32,60 @@ if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
 }
 const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY || '';
 
+// ── Firebase Admin per notifiche push native (FCM) ──
+const admin = require('firebase-admin');
+let fcmReady = false;
+try {
+  if (process.env.GOOGLE_CREDENTIALS) {
+    admin.initializeApp({
+      credential: admin.credential.cert(JSON.parse(process.env.GOOGLE_CREDENTIALS))
+    });
+    fcmReady = true;
+    console.log('Firebase Admin inizializzato (FCM attivo)');
+  }
+} catch (e) {
+  console.warn('Firebase Admin init fallito:', e.message);
+}
+
+// ── Invio notifiche: FCM ai token nativi, web-push ai browser ──
+// Foglio PushTokens: A=Operaio | B=Dato | C=Tipo ('fcm' | 'web')
 async function pushNotifica(sheets, operai, titolo, corpo) {
-  if (!process.env.VAPID_PUBLIC_KEY) return;
   try {
     const rows = await leggi(sheets, SH.PUSHTOKENS).catch(() => []);
     const targets = rows.slice(1).filter(r => r[0] && operai.includes(r[0]));
+
     for (const row of targets) {
-      try {
-        const sub = JSON.parse(row[1]);
-        await webpush.sendNotification(sub, JSON.stringify({ title: titolo, body: corpo, icon: '/icon.svg' }));
-      } catch(e) { console.warn('Push fallita per', row[0], e.statusCode); }
+      const operaio = row[0];
+      const dato    = row[1];
+      const tipo    = (row[2] || '').toLowerCase();
+
+      // ── Token FCM nativo ──
+      if (tipo === 'fcm' && fcmReady) {
+        try {
+          await admin.messaging().send({
+            token: dato,
+            notification: { title: titolo, body: corpo },
+            android: { priority: 'high', notification: { sound: 'default' } }
+          });
+        } catch (e) {
+          console.warn('FCM fallita per', operaio, e.code || e.message);
+        }
+        continue;
+      }
+
+      // ── Subscription web push (browser) ──
+      if (process.env.VAPID_PUBLIC_KEY) {
+        try {
+          const sub = JSON.parse(dato);
+          await webpush.sendNotification(sub, JSON.stringify({ title: titolo, body: corpo, icon: '/icon.svg' }));
+        } catch (e) {
+          console.warn('Web push fallita per', operaio, e.statusCode || e.message);
+        }
+      }
     }
-  } catch(e) { console.warn('pushNotifica error:', e.message); }
+  } catch (e) {
+    console.warn('pushNotifica error:', e.message);
+  }
 }
 
 function getAuth() {
@@ -74,15 +116,19 @@ app.get('/vapid-public', (req, res) => res.json({ key: VAPID_PUBLIC }));
 
 app.post('/registra-push', async (req, res) => {
   try {
-    const { operaio, subscription } = req.body;
-    if (!operaio || !subscription) return res.json({ ok: false });
+    const { operaio, subscription, fcmToken } = req.body;
+    if (!operaio || (!subscription && !fcmToken)) return res.json({ ok: false });
+
+    const dato = fcmToken ? fcmToken : JSON.stringify(subscription);
+    const tipo = fcmToken ? 'fcm' : 'web';
+
     const sheets = await getSheets();
     const rows   = await leggi(sheets, SH.PUSHTOKENS).catch(() => []);
     const idx = rows.findIndex((r,i) => i > 0 && r[0] === operaio);
     if (idx > 0) {
-      await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.PUSHTOKENS}!A${idx+1}:B${idx+1}`, valueInputOption: 'RAW', requestBody: { values: [[operaio, JSON.stringify(subscription)]] } });
+      await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.PUSHTOKENS}!A${idx+1}:C${idx+1}`, valueInputOption: 'RAW', requestBody: { values: [[operaio, dato, tipo]] } });
     } else {
-      await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: SH.PUSHTOKENS, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [[operaio, JSON.stringify(subscription)]] } });
+      await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: SH.PUSHTOKENS, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [[operaio, dato, tipo]] } });
     }
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
