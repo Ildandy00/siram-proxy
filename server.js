@@ -846,8 +846,8 @@ app.post('/richiedi-preventivo', (req, res) => res.json({ ok: true, id: 'PREV-' 
 // ============================================================
 app.get('/config-presenze', (req, res) => {
   res.json({
-    orari: ['12:40', '16:00'],   // TEST: 12:40 temporaneo per collaudo — rimettere '07:15'
-    tolleranzaMin: 20,           // TEST: finestra ampia per collaudo — rimettere 5
+    orari: ['07:15', '16:00'],   // orari di rilevamento (HH:MM, 24h)
+    tolleranzaMin: 5,            // finestra ± minuti attorno a ogni orario
     giorni: 'sempre',
     attivo: true
   });
@@ -878,8 +878,8 @@ app.post('/registra-presenza', async (req, res) => {
 
     const sheets  = await getSheets();
     const oggi    = new Date();
-    const dataStr = oggi.toISOString().slice(0,10);
-    const oraStr  = oggi.toLocaleTimeString('it-IT', { hour:'2-digit', minute:'2-digit' });
+    const dataStr = oggi.toLocaleDateString('en-CA', { timeZone: 'Europe/Rome' }); // yyyy-MM-dd in ora italiana
+    const oraStr  = oggi.toLocaleTimeString('it-IT', { hour:'2-digit', minute:'2-digit', timeZone: 'Europe/Rome' });
     const id      = 'PRE-' + Math.random().toString(36).substring(2,10).toUpperCase();
 
     // Trova impianto più vicino tra quelli dell'operaio oggi
