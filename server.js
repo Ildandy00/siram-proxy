@@ -32,59 +32,43 @@ if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
 }
 const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY || '';
 
-// ── Firebase Admin per notifiche push native (FCM) ──
-const admin = require('firebase-admin');
-let fcmReady = false;
-try {
-  if (process.env.GOOGLE_CREDENTIALS) {
-    admin.initializeApp({
-      credential: admin.credential.cert(JSON.parse(process.env.GOOGLE_CREDENTIALS))
-    });
-    fcmReady = true;
-    console.log('Firebase Admin inizializzato (FCM attivo)');
-  }
-} catch (e) {
-  console.warn('Firebase Admin init fallito:', e.message);
+// ── OneSignal per notifiche push native ──
+const ONESIGNAL_APP_ID  = process.env.ONESIGNAL_APP_ID  || '';
+const ONESIGNAL_API_KEY = process.env.ONESIGNAL_API_KEY || '';
+const oneSignalPronto = !!(ONESIGNAL_APP_ID && ONESIGNAL_API_KEY);
+if (oneSignalPronto) {
+  console.log('OneSignal configurato (push attivo)');
+} else {
+  console.warn('OneSignal non configurato — variabili ONESIGNAL_APP_ID/ONESIGNAL_API_KEY mancanti');
 }
 
-// ── Invio notifiche: FCM ai token nativi, web-push ai browser ──
-// Foglio PushTokens: A=Operaio | B=Dato | C=Tipo ('fcm' | 'web')
+// ── Invio notifica push via OneSignal usando external_id (nome operaio) ──
+// operai: array di nomi operaio (es. ['Matteo'])
 async function pushNotifica(sheets, operai, titolo, corpo) {
+  if (!oneSignalPronto) { console.warn('pushNotifica: OneSignal non configurato'); return; }
   try {
-    const rows = await leggi(sheets, SH.PUSHTOKENS).catch(() => []);
-    const targets = rows.slice(1).filter(r => r[0] && operai.includes(r[0]));
-
-    for (const row of targets) {
-      const operaio = row[0];
-      const dato    = row[1];
-      const tipo    = (row[2] || '').toLowerCase();
-
-      // ── Token FCM nativo ──
-      if (tipo === 'fcm' && fcmReady) {
-        try {
-          await admin.messaging().send({
-            token: dato,
-            notification: { title: titolo, body: corpo },
-            android: { priority: 'high', notification: { sound: 'default' } }
-          });
-        } catch (e) {
-          console.warn('FCM fallita per', operaio, e.code || e.message);
-        }
-        continue;
-      }
-
-      // ── Subscription web push (browser) ──
-      if (process.env.VAPID_PUBLIC_KEY) {
-        try {
-          const sub = JSON.parse(dato);
-          await webpush.sendNotification(sub, JSON.stringify({ title: titolo, body: corpo, icon: '/icon.svg' }));
-        } catch (e) {
-          console.warn('Web push fallita per', operaio, e.statusCode || e.message);
-        }
-      }
+    const resp = await fetch('https://onesignal.com/api/v1/notifications', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Authorization': 'Basic ' + ONESIGNAL_API_KEY
+      },
+      body: JSON.stringify({
+        app_id: ONESIGNAL_APP_ID,
+        include_aliases: { external_id: operai },
+        target_channel: 'push',
+        headings: { en: titolo, it: titolo },
+        contents: { en: corpo, it: corpo }
+      })
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (data.errors) {
+      console.warn('OneSignal errori:', JSON.stringify(data.errors));
+    } else {
+      console.log('OneSignal inviata a', operai.join(','), '— id:', data.id || '?');
     }
   } catch (e) {
-    console.warn('pushNotifica error:', e.message);
+    console.warn('pushNotifica (OneSignal) error:', e.message);
   }
 }
 
