@@ -839,6 +839,21 @@ app.get('/preventivi', (req, res) => res.json({ preventivi: [] }));
 app.post('/richiedi-preventivo', (req, res) => res.json({ ok: true, id: 'PREV-' + Math.random().toString(36).substring(2,10).toUpperCase() }));
 
 // ============================================================
+//  CONFIG PRESENZE — orari e parametri letti dal client nativo
+//  Modifica qui gli orari senza dover ricompilare l'APK.
+//  Il worker nativo Android chiama questo endpoint per sapere
+//  a che ora rilevare la presenza.
+// ============================================================
+app.get('/config-presenze', (req, res) => {
+  res.json({
+    orari: ['07:15', '16:00'],   // orari di rilevamento (HH:MM, 24h)
+    tolleranzaMin: 5,            // finestra ± minuti attorno a ogni orario
+    giorni: 'sempre',           // 'sempre' | 'feriali'
+    attivo: true                // false per disattivare il rilevamento da remoto
+  });
+});
+
+// ============================================================
 //  PRESENZE GPS
 //  Foglio Presenze: A=ID | B=Operaio | C=Data | D=Ora | E=Tipo
 //                  F=Lat | G=Lon | H=ImpiantoPiuVicino | I=DistanzaKm | J=FuoriRaggio | K=LinkGMaps
