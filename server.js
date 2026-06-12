@@ -846,10 +846,10 @@ app.post('/richiedi-preventivo', (req, res) => res.json({ ok: true, id: 'PREV-' 
 // ============================================================
 app.get('/config-presenze', (req, res) => {
   res.json({
-    orari: ['07:15', '16:00'],   // orari di rilevamento (HH:MM, 24h)
-    tolleranzaMin: 5,            // finestra ± minuti attorno a ogni orario
-    giorni: 'sempre',           // 'sempre' | 'feriali'
-    attivo: true                // false per disattivare il rilevamento da remoto
+    orari: ['12:40', '16:00'],   // TEST: 12:40 temporaneo per collaudo — rimettere '07:15'
+    tolleranzaMin: 20,           // TEST: finestra ampia per collaudo — rimettere 5
+    giorni: 'sempre',
+    attivo: true
   });
 });
 
