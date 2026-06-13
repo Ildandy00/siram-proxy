@@ -368,7 +368,14 @@ app.post('/notifica-fmp', async (req, res) => {
     const rImp   = await leggi(sheets, SH.IMPIANTI);
     const impRow = rImp.slice(1).find(r=>r[0]===codiceImpianto);
     const nome   = impRow ? impRow[1] : codiceImpianto;
-    await pushNotifica(sheets, [operaio], '🚨 Nuova segnalazione FMP', `${nome} — ${note.slice(0,80)}`);
+    const corpo  = `${nome} — ${(note || '').slice(0,80)}`;
+    const operaioTrim = (operaio || '').toString().trim();
+    if (operaioTrim) {
+      await pushNotifica(sheets, [operaioTrim], '🚨 Nuova segnalazione FMP', corpo);
+    } else {
+      // Operaio vuoto → la richiesta è nel contenitore: avvisa tutti
+      await pushNotifica(sheets, OPERAI_TUTTI, '📦 Nuova richiesta nel contenitore', corpo);
+    }
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
