@@ -20,7 +20,9 @@ const SH = {
   REPERIBILITA:'Reperibilita',
   PRESENZE:    'Presenze',
   ASSEGNAZIONE:'Assegnazione',
-};
+  };
+// Operai a cui notificare le nuove richieste del contenitore
+const OPERAI_TUTTI = ['Matteo', 'Stefano', 'Michele', 'Ezio'];
 
 const webpush = require('web-push');
 if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
@@ -305,7 +307,14 @@ app.post('/crea-intervento', async (req, res) => {
       const impRow = rImp.slice(1).find(r=>r[0]===codiceImpianto);
       const nomeImp = impRow ? impRow[1] : codiceImpianto;
       const dataFmt = new Date(dataPrevista+'T00:00:00').toLocaleDateString('it-IT',{weekday:'short',day:'numeric',month:'short'});
-      await pushNotifica(sheets, [operaio], '📋 Nuovo intervento assegnato', `${nomeImp} — ${tipoVisita} · ${dataFmt}`);
+      const operaioTrim = (operaio || '').toString().trim();
+      if (!operaioTrim) {
+        // Richiesta senza operaio → entra nel contenitore: avvisa TUTTI gli operai
+        await pushNotifica(sheets, OPERAI_TUTTI, '📦 Nuova richiesta nel contenitore', `${nomeImp} — ${tipoVisita} · ${dataFmt}`);
+      } else {
+        // Intervento assegnato a un operaio specifico
+        await pushNotifica(sheets, [operaioTrim], '📋 Nuovo intervento assegnato', `${nomeImp} — ${tipoVisita} · ${dataFmt}`);
+      }
     }
     res.json({ ok: true, id });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
