@@ -197,9 +197,8 @@ app.post('/aggiorna-intervento', async (req, res) => {
     if (stato === 'Chiuso' && notaChiusura) {
       const rowNota = rows.findIndex((r,idx) => idx > 0 && r[0] === id);
       if (rowNota > 0) {
-        const notaEsistente = rows[rowNota][6] || '';
-        const nuovaNota = notaEsistente ? notaEsistente + ' | Chiusura: ' + notaChiusura : 'Chiusura: ' + notaChiusura;
-        await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!G${rowNota+1}`, valueInputOption: 'RAW', requestBody: { values: [[nuovaNota]] } });
+        // Nota di chiusura dell'operaio nella colonna dedicata O
+        await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!O${rowNota+1}`, valueInputOption: 'RAW', requestBody: { values: [[notaChiusura]] } });
       }
     }
     if (operaio) {
