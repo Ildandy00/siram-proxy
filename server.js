@@ -20,9 +20,7 @@ const SH = {
   REPERIBILITA:'Reperibilita',
   PRESENZE:    'Presenze',
   ASSEGNAZIONE:'Assegnazione',
-  };
-// Operai a cui notificare le nuove richieste del contenitore
-const OPERAI_TUTTI = ['Matteo', 'Stefano', 'Michele', 'Ezio'];
+};
 
 const webpush = require('web-push');
 if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
@@ -239,7 +237,7 @@ app.get('/dati-responsabile', async (req, res) => {
     ]);
     const impianti   = rImp.slice(1).filter(r=>r[0]).map(r=>({ codice:r[0]||'', descrizione:r[1]||'', comune:r[2]||'', indirizzo:r[3]||'', operaioDefault:r[4]||'' }));
     const catalogo   = rCat.slice(1).filter(r=>r[0]).map(r=>({ codiceImpianto:r[0]||'', tipoVisita:r[1]||'', attivita:r[2]||'', ordine:Number(r[3])||0, obbligatoria:r[4]||'SI' }));
-    const interventi = rInt.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', codiceImpianto:r[1]||'', dataPrevista:fmtData(r[2]), operaio:r[3]||'', tipoVisita:r[4]||'', stato:r[5]||'', note:r[6]||'', dataChiusura:fmtData(r[7]), creatoIl:fmtData(r[8]), secondoOperaio:r[9]||'', interventoCollegato:r[10]||'', linkDrive:r[11]||'', dataFine:fmtData(r[12]), operaioSecondario2:r[13]||'' }));
+    const interventi = rInt.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', codiceImpianto:r[1]||'', dataPrevista:fmtData(r[2]), operaio:r[3]||'', tipoVisita:r[4]||'', stato:r[5]||'', note:r[6]||'', dataChiusura:fmtData(r[7]), creatoIl:fmtData(r[8]), secondoOperaio:r[9]||'', interventoCollegato:r[10]||'', linkDrive:r[11]||'', dataFine:fmtData(r[12]), operaioSecondario2:r[13]||'', notaChiusura:r[14]||'' }));
     const checklist  = rChk.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', idIntervento:r[1]||'', attivita:r[2]||'', eseguita:r[3]||'NO', oraCompletamento:fmtDateTime(r[4]), note:r[5]||'', extra:r[6]||'NO' }));
     const assenze    = rAss.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', operaio:r[1]||'', dataInizio:fmtData(r[2]), dataFine:fmtData(r[3]), tipo:r[4]||'', note:r[5]||'' }));
     // Pratiche — 19 colonne A→S
@@ -306,14 +304,7 @@ app.post('/crea-intervento', async (req, res) => {
       const impRow = rImp.slice(1).find(r=>r[0]===codiceImpianto);
       const nomeImp = impRow ? impRow[1] : codiceImpianto;
       const dataFmt = new Date(dataPrevista+'T00:00:00').toLocaleDateString('it-IT',{weekday:'short',day:'numeric',month:'short'});
-      const operaioTrim = (operaio || '').toString().trim();
-      if (!operaioTrim) {
-        // Richiesta senza operaio → entra nel contenitore: avvisa TUTTI gli operai
-        await pushNotifica(sheets, OPERAI_TUTTI, '📦 Nuova richiesta nel contenitore', `${nomeImp} — ${tipoVisita} · ${dataFmt}`);
-      } else {
-        // Intervento assegnato a un operaio specifico
-        await pushNotifica(sheets, [operaioTrim], '📋 Nuovo intervento assegnato', `${nomeImp} — ${tipoVisita} · ${dataFmt}`);
-      }
+      await pushNotifica(sheets, [operaio], '📋 Nuovo intervento assegnato', `${nomeImp} — ${tipoVisita} · ${dataFmt}`);
     }
     res.json({ ok: true, id });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
@@ -367,14 +358,7 @@ app.post('/notifica-fmp', async (req, res) => {
     const rImp   = await leggi(sheets, SH.IMPIANTI);
     const impRow = rImp.slice(1).find(r=>r[0]===codiceImpianto);
     const nome   = impRow ? impRow[1] : codiceImpianto;
-    const corpo  = `${nome} — ${(note || '').slice(0,80)}`;
-    const operaioTrim = (operaio || '').toString().trim();
-    if (operaioTrim) {
-      await pushNotifica(sheets, [operaioTrim], '🚨 Nuova segnalazione FMP', corpo);
-    } else {
-      // Operaio vuoto → la richiesta è nel contenitore: avvisa tutti
-      await pushNotifica(sheets, OPERAI_TUTTI, '📦 Nuova richiesta nel contenitore', corpo);
-    }
+    await pushNotifica(sheets, [operaio], '🚨 Nuova segnalazione FMP', `${nome} — ${note.slice(0,80)}`);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
