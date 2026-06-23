@@ -207,7 +207,7 @@ app.post('/aggiorna-intervento', async (req, res) => {
         await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!P${rowNR+1}`, valueInputOption: 'RAW', requestBody: { values: [[noteResponsabile]] } });
       }
     }
-    if (operaio) {
+    if (operaio !== undefined) {
       const rowOp = rows.findIndex((r,idx) => idx > 0 && r[0] === id);
       if (rowOp > 0) {
         await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!D${rowOp+1}`, valueInputOption: 'RAW', requestBody: { values: [[operaio]] } });
