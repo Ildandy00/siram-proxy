@@ -846,6 +846,86 @@ app.get('/preventivi', (req, res) => res.json({ preventivi: [] }));
 app.post('/richiedi-preventivo', (req, res) => res.json({ ok: true, id: 'PREV-' + Math.random().toString(36).substring(2,10).toUpperCase() }));
 
 // ============================================================
+//  SCADENZE RCEE — GET /scadenze-rcee
+//  Legge il foglio "ScadenzeRCEE" (colonne individuate dal nome in
+//  riga 1), raggruppa per Codice Impianto (un RCEE = un impianto),
+//  e restituisce le scadenze ordinate per giorni mancanti crescenti.
+// ============================================================
+app.get('/scadenze-rcee', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const resp = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: 'ScadenzeRCEE',
+      valueRenderOption: 'FORMATTED_VALUE',
+    });
+    const rows = resp.data.values || [];
+    if (rows.length < 2) return res.json({ ok: true, scadenze: [] });
+
+    const norm = (s) => (s || '').toString().toLowerCase()
+      .replace(/[àáâ]/g,'a').replace(/[èé]/g,'e').replace(/[ìí]/g,'i')
+      .replace(/[òó]/g,'o').replace(/[ùú]/g,'u').replace(/[^a-z0-9]/g,'');
+    const H = rows[0].map(norm);
+    const find = (pred) => { for (let i=0;i<H.length;i++) if (pred(H[i])) return i; return -1; };
+    const C = {
+      targa:  find(h => h.indexOf('targat') >= 0),
+      imp:    find(h => h === 'codiceimpianto' || (h.indexOf('impianto')>=0 && h.indexOf('codice')>=0 && h.indexOf('potenza')<0)),
+      anag:   find(h => h.indexOf('anagrafica') >= 0),
+      desc:   find(h => h.indexOf('descrizione') >= 0),
+      comm:   find(h => h.indexOf('commessa') >= 0),
+      alim:   find(h => h.indexOf('alimentazione') >= 0),
+      pottot: find(h => h.indexOf('potenza')>=0 && h.indexOf('impianto')>=0),
+      ult:    find(h => h.indexOf('ultimo') >= 0),
+      per:    find(h => h.indexOf('periodic') >= 0),
+      prox:   find(h => h.indexOf('prossima')>=0 || h.indexOf('scadenza')>=0),
+      giorni: find(h => h.indexOf('giorni') >= 0),
+      stato:  find(h => h.indexOf('stato') >= 0),
+    };
+    const g = (r, i) => (i >= 0 && r[i] !== undefined) ? r[i] : '';
+
+    const perImpianto = {};
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      const cod  = (g(r, C.imp)  || '').toString().trim();
+      const anag = (g(r, C.anag) || '').toString().trim();
+      if (!cod && !anag) continue;
+      const stato = (g(r, C.stato) || '').toString().trim().toUpperCase();
+      if (!(stato === 'OK' || stato === 'IN SCADENZA' || stato === 'SCADUTO')) continue;
+
+      const key = cod || ('ANAG:' + anag);
+      if (!perImpianto[key]) {
+        perImpianto[key] = {
+          codiceImpianto: cod,
+          codiceAnagrafica: anag,
+          targa: (g(r, C.targa) || '').toString().trim(),
+          descrizione: (g(r, C.desc) || '').toString().trim(),
+          commessa: (g(r, C.comm) || '').toString().trim(),
+          alimentazione: (g(r, C.alim) || '').toString().trim(),
+          potenzaImpianto: (g(r, C.pottot) || '').toString().trim(),
+          dataUltimo: (g(r, C.ult) || '').toString().trim(),
+          periodicita: (g(r, C.per) || '').toString().trim(),
+          prossimaScadenza: (g(r, C.prox) || '').toString().trim(),
+          giorni: parseInt((g(r, C.giorni) || '').toString().replace(/[^\-0-9]/g, ''), 10),
+          stato: stato,
+          nGeneratori: 0,
+        };
+      }
+      perImpianto[key].nGeneratori++;
+    }
+
+    const scadenze = Object.values(perImpianto).sort((a, b) => {
+      const ga = isNaN(a.giorni) ? 1e9 : a.giorni;
+      const gb = isNaN(b.giorni) ? 1e9 : b.giorni;
+      return ga - gb;
+    });
+
+    res.json({ ok: true, scadenze });
+  } catch (err) {
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
 //  CONFIG PRESENZE — orari e parametri letti dal client nativo
 //  Modifica qui gli orari senza dover ricompilare l'APK.
 //  Il worker nativo Android chiama questo endpoint per sapere
