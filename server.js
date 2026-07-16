@@ -20,6 +20,9 @@ const SH = {
   REPERIBILITA:'Reperibilita',
   PRESENZE:    'Presenze',
   ASSEGNAZIONE:'Assegnazione',
+  CONTATORI:   'Contatori',
+  LETTURE:     'Letture',
+  CONFIG:      'Config',
 };
 
 const webpush = require('web-push');
@@ -923,6 +926,304 @@ app.get('/scadenze-rcee', async (req, res) => {
   } catch (err) {
     res.status(500).json({ ok: false, errore: err.message });
   }
+});
+
+// ============================================================
+//  LETTURE CONTATORI
+//
+//  Foglio "Contatori" (generato da CostruisciContatori.gs):
+//   A=IdContatore | B=CodiceImpianto | C=CodiceIT | D=CodElem |
+//   E=Fascia | F=Vettore | G=Tipo | H=DescrizioneElemento |
+//   I=Unita | J=DescrizioneImport | K=UltimaLettura |
+//   L=DataUltimaLettura | M=RigaImport | N=Attivo | O=Ordine | P=StatoMerge
+//
+//  Foglio "Letture" (storico, append/aggiorna):
+//   A=ID | B=DataOra | C=IdContatore | D=CodiceImpianto | E=CodiceIT |
+//   F=CodElem | G=Fascia | H=Operaio | I=Valore | J=Unita |
+//   K=Evento | L=Commenti | M=MeseCompetenza | N=Lat | O=Lon |
+//   P=LetturaPrecedente | Q=Consumo
+//
+//  Foglio "Config": A=Chiave | B=Valore
+//   GIORNI_LETTURA        es. "19,20,21,22,23,24"
+//   LETTURE_SEMPRE_APERTE "SI" per disattivare il blocco sui giorni
+// ============================================================
+
+const GIORNI_LETTURA_DEFAULT = [19, 20, 21, 22, 23, 24];
+const EVENTI_LETTURA = ['LETTURA NORMALE', 'GUASTO'];
+
+// Data odierna in fuso italiano, formato yyyy-MM-dd
+function oggiItalia() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Rome' });
+}
+
+// Numeri con virgola decimale: "1063,15" -> 1063.15 ; "1.234,5" -> 1234.5
+function numLettura(v) {
+  if (v === null || v === undefined || v === '') return null;
+  if (typeof v === 'number') return v;
+  let s = v.toString().trim();
+  if (!s) return null;
+  if (s.indexOf(',') >= 0) s = s.replace(/\./g, '').replace(',', '.');
+  const n = parseFloat(s);
+  return isNaN(n) ? null : n;
+}
+
+function normIntestazione(s) {
+  return (s || '').toString().toLowerCase()
+    .replace(/[àáâ]/g,'a').replace(/[èé]/g,'e').replace(/[ìí]/g,'i')
+    .replace(/[òó]/g,'o').replace(/[ùú]/g,'u').replace(/[^a-z0-9]/g,'');
+}
+
+// Individua le colonne per nome, con posizione di riserva
+function mappaColonne(intestazioni, definizioni) {
+  const H = (intestazioni || []).map(normIntestazione);
+  const out = {};
+  Object.keys(definizioni).forEach(campo => {
+    const def = definizioni[campo];
+    let idx = H.indexOf(normIntestazione(def.nome));
+    if (idx < 0) idx = def.pos;
+    out[campo] = idx;
+  });
+  return out;
+}
+
+const COL_CONTATORI = {
+  id:        { nome: 'IdContatore',         pos: 0 },
+  impianto:  { nome: 'CodiceImpianto',      pos: 1 },
+  codiceIT:  { nome: 'CodiceIT',            pos: 2 },
+  codElem:   { nome: 'CodElem',             pos: 3 },
+  fascia:    { nome: 'Fascia',              pos: 4 },
+  vettore:   { nome: 'Vettore',             pos: 5 },
+  tipo:      { nome: 'Tipo',                pos: 6 },
+  descr:     { nome: 'DescrizioneElemento', pos: 7 },
+  unita:     { nome: 'Unita',               pos: 8 },
+  ultima:    { nome: 'UltimaLettura',       pos: 10 },
+  dataUltima:{ nome: 'DataUltimaLettura',   pos: 11 },
+  attivo:    { nome: 'Attivo',              pos: 13 },
+  ordine:    { nome: 'Ordine',              pos: 14 },
+  statoMerge:{ nome: 'StatoMerge',          pos: 15 },
+};
+
+// Legge la configurazione letture dal foglio Config (assente = default)
+async function configLetture(sheets) {
+  let giorni = GIORNI_LETTURA_DEFAULT.slice();
+  let sempreAperte = false;
+  try {
+    const rows = await leggi(sheets, SH.CONFIG);
+    rows.slice(1).forEach(r => {
+      const k = (r[0] || '').toString().trim().toUpperCase();
+      const v = (r[1] || '').toString().trim();
+      if (k === 'GIORNI_LETTURA' && v) {
+        const parsed = v.split(/[^0-9]+/).map(x => parseInt(x, 10))
+          .filter(n => !isNaN(n) && n >= 1 && n <= 31);
+        if (parsed.length) giorni = parsed;
+      }
+      if (k === 'LETTURE_SEMPRE_APERTE') sempreAperte = v.toUpperCase() === 'SI';
+    });
+  } catch (e) {
+    console.warn('Foglio Config assente o illeggibile — uso i giorni di default');
+  }
+  giorni = Array.from(new Set(giorni)).sort((a, b) => a - b);
+
+  const oggi        = oggiItalia();                    // yyyy-MM-dd
+  const giornoOggi  = parseInt(oggi.slice(8, 10), 10);
+  const apertoOggi  = sempreAperte || giorni.indexOf(giornoOggi) >= 0;
+
+  // Prossimo giorno utile: nel mese corrente se c'è, altrimenti il primo del mese dopo
+  let prossimo = giorni.find(g => g >= giornoOggi);
+  let prossimaFinestra = '';
+  if (prossimo !== undefined) {
+    prossimaFinestra = String(prossimo).padStart(2, '0') + '/' + oggi.slice(5, 7);
+  } else if (giorni.length) {
+    const m = parseInt(oggi.slice(5, 7), 10);
+    const mm = m === 12 ? 1 : m + 1;
+    prossimaFinestra = String(giorni[0]).padStart(2, '0') + '/' + String(mm).padStart(2, '0');
+  }
+
+  return { giorni, sempreAperte, apertoOggi, oggi, giornoOggi, prossimaFinestra };
+}
+
+// GET /config-letture
+app.get('/config-letture', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const cfg    = await configLetture(sheets);
+    res.json({ ok: true, ...cfg, eventi: EVENTI_LETTURA });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// GET /letture-dati
+// Restituisce config + anagrafica contatori (con ultima lettura disponibile)
+// + le letture del mese di competenza corrente.
+app.get('/letture-dati', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const [rCon, rLet, cfg] = await Promise.all([
+      leggi(sheets, SH.CONTATORI).catch(() => []),
+      leggi(sheets, SH.LETTURE).catch(() => []),
+      configLetture(sheets),
+    ]);
+
+    if (rCon.length < 2) {
+      return res.json({ ok: true, ...cfg, contatori: [], letture: [],
+        avviso: 'Foglio Contatori vuoto — lancia costruisciContatori() in Apps Script' });
+    }
+
+    const C = mappaColonne(rCon[0], COL_CONTATORI);
+    const g = (r, i) => (i >= 0 && r[i] !== undefined && r[i] !== null) ? r[i].toString().trim() : '';
+
+    // Storico letture indicizzato per contatore (l'ultima riga vince)
+    const ultimaDaLetture = {};
+    const lettureMese     = [];
+    const meseCorrente    = cfg.oggi.slice(0, 7);
+
+    rLet.slice(1).forEach(r => {
+      const idc = (r[2] || '').toString().trim();
+      if (!idc) return;
+      ultimaDaLetture[idc] = {
+        valore: numLettura(r[8]),
+        data:   (r[1] || '').toString().trim(),
+      };
+      if ((r[12] || '').toString().trim() === meseCorrente) {
+        lettureMese.push({
+          id:          (r[0] || '').toString(),
+          dataOra:     (r[1] || '').toString(),
+          idContatore: idc,
+          operaio:     (r[7] || '').toString(),
+          valore:      numLettura(r[8]),
+          evento:      (r[10] || '').toString(),
+          commenti:    (r[11] || '').toString(),
+          consumo:     numLettura(r[16]),
+        });
+      }
+    });
+
+    const contatori = rCon.slice(1).filter(r => g(r, C.id)).map(r => {
+      const id  = g(r, C.id);
+      const ult = ultimaDaLetture[id];
+      return {
+        id,
+        codiceImpianto: g(r, C.impianto),
+        codiceIT:       g(r, C.codiceIT),
+        codElem:        g(r, C.codElem),
+        fascia:         g(r, C.fascia),
+        vettore:        g(r, C.vettore),
+        tipo:           g(r, C.tipo),
+        descrizione:    g(r, C.descr),
+        unita:          g(r, C.unita),
+        ordine:         parseInt(g(r, C.ordine), 10) || 99,
+        attivo:         (g(r, C.attivo) || 'SI').toUpperCase() !== 'NO',
+        statoMerge:     g(r, C.statoMerge),
+        ultimaLettura:      ult ? ult.valore : numLettura(g(r, C.ultima)),
+        dataUltimaLettura:  ult ? ult.data   : g(r, C.dataUltima),
+        origineUltima:      ult ? 'app' : 'import',
+      };
+    }).filter(c => c.attivo && c.codiceImpianto && c.statoMerge !== 'IMPIANTO NON TROVATO');
+
+    res.json({ ok: true, ...cfg, contatori, letture: lettureMese, meseCorrente });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// POST /salva-lettura
+// body: { idContatore, valore, evento, commenti, operaio, lat, lon }
+// Una sola lettura per contatore per mese di competenza: se esiste già,
+// la riga viene aggiornata invece di crearne una seconda.
+app.post('/salva-lettura', async (req, res) => {
+  try {
+    const { idContatore, valore, evento, commenti, operaio, lat, lon } = req.body;
+    if (!idContatore || !operaio) return res.json({ ok: false, errore: 'idContatore e operaio richiesti' });
+
+    const val = numLettura(valore);
+    if (val === null) return res.json({ ok: false, errore: 'Valore non numerico' });
+
+    const sheets = await getSheets();
+    const cfg    = await configLetture(sheets);
+    if (!cfg.apertoOggi) {
+      return res.json({ ok: false, chiuso: true,
+        errore: 'Le letture sono aperte solo nei giorni ' + cfg.giorni.join(', ') + ' del mese' });
+    }
+
+    const rCon = await leggi(sheets, SH.CONTATORI).catch(() => []);
+    if (rCon.length < 2) return res.json({ ok: false, errore: 'Foglio Contatori vuoto' });
+    const C = mappaColonne(rCon[0], COL_CONTATORI);
+    const g = (r, i) => (i >= 0 && r[i] !== undefined && r[i] !== null) ? r[i].toString().trim() : '';
+
+    const riga = rCon.slice(1).find(r => g(r, C.id) === idContatore);
+    if (!riga) return res.json({ ok: false, errore: 'Contatore non trovato: ' + idContatore });
+
+    const rLet = await leggi(sheets, SH.LETTURE).catch(() => []);
+    const mese = cfg.oggi.slice(0, 7);
+
+    // Lettura precedente = ultima riga in Letture di un mese diverso,
+    // altrimenti il valore di bootstrap dal file importazioni.
+    let precedente = null;
+    for (let i = rLet.length - 1; i >= 1; i--) {
+      const r = rLet[i];
+      if ((r[2] || '').toString().trim() !== idContatore) continue;
+      if ((r[12] || '').toString().trim() === mese) continue;
+      precedente = numLettura(r[8]);
+      break;
+    }
+    if (precedente === null) precedente = numLettura(g(riga, C.ultima));
+
+    const consumo = (precedente !== null && val >= precedente) ? +(val - precedente).toFixed(3) : '';
+    const ora = new Date().toLocaleString('it-IT', {
+      day:'2-digit', month:'2-digit', year:'numeric',
+      hour:'2-digit', minute:'2-digit', timeZone:'Europe/Rome'
+    });
+
+    const eventoFinale = EVENTI_LETTURA.indexOf((evento || '').toUpperCase()) >= 0
+      ? evento.toUpperCase() : EVENTI_LETTURA[0];
+
+    // Riga già presente per questo contatore nel mese corrente?
+    const idxEsistente = rLet.findIndex((r, i) =>
+      i > 0 &&
+      (r[2] || '').toString().trim() === idContatore &&
+      (r[12] || '').toString().trim() === mese
+    );
+
+    const valori = [
+      idxEsistente > 0 ? (rLet[idxEsistente][0] || '') : ('LET-' + Math.random().toString(36).substring(2,10).toUpperCase()),
+      ora,
+      idContatore,
+      g(riga, C.impianto),
+      g(riga, C.codiceIT),
+      g(riga, C.codElem),
+      g(riga, C.fascia),
+      operaio,
+      val,
+      g(riga, C.unita),
+      eventoFinale,
+      commenti || '',
+      mese,
+      lat != null ? lat : '',
+      lon != null ? lon : '',
+      precedente !== null ? precedente : '',
+      consumo,
+    ];
+
+    if (idxEsistente > 0) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: `${SH.LETTURE}!A${idxEsistente+1}:Q${idxEsistente+1}`,
+        valueInputOption: 'RAW', requestBody: { values: [valori] },
+      });
+    } else {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SHEET_ID, range: SH.LETTURE,
+        valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: [valori] },
+      });
+    }
+
+    res.json({
+      ok: true,
+      id: valori[0],
+      aggiornata: idxEsistente > 0,
+      precedente,
+      consumo,
+      calo: (precedente !== null && val < precedente),
+    });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
 
 // ============================================================
