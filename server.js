@@ -941,11 +941,25 @@ app.get('/scadenze-rcee', async (req, res) => {
 //   A=ID | B=DataOra | C=IdContatore | D=CodiceImpianto | E=CodiceIT |
 //   F=CodElem | G=Fascia | H=Operaio | I=Valore | J=Unita |
 //   K=Evento | L=Commenti | M=MeseCompetenza | N=Lat | O=Lon |
-//   P=LetturaPrecedente | Q=Consumo
+//   P=LetturaPrecedente | Q=Consumo | R=StringaImport
+//
+//  La stringa di importazione nasce insieme alla riga:
+//   CODICE_IT ; COD_ELEM ; FASCIA ; ; AAAAMMGG ; ; ; LETTURA ;
+//   es. IT045643Y;5;;;20260724;;;6989;   (decimali con la virgola)
+//  Contatore non letto = nessuna riga = nessuna stringa: l'assenza viene
+//  segnalata come anomalia dal gestionale, invece di passare inosservata
+//  come farebbe una lettura vecchia ridatata.
 //
 //  Foglio "Config": A=Chiave | B=Valore
-//   GIORNI_LETTURA        es. "19,20,21,22,23,24"
-//   LETTURE_SEMPRE_APERTE "SI" per disattivare il blocco sui giorni
+//   GIORNI_LETTURA           default, es. "19,20,21,22,23,24"
+//   GIORNI_LETTURA_2026-08   override del singolo mese (vince sul default)
+//   DATA_CAMPAGNA_2026-08    data che finisce nella stringa di importazione
+//   LETTURE_SEMPRE_APERTE    "SI" per disattivare il blocco sui giorni
+//
+//  I giorni cambiano di mese in mese: si aggiunge la riga del mese quando
+//  vengono comunicati. Se la riga del mese manca, vale GIORNI_LETTURA.
+//  Le stesse chiavi sono lette da GeneraImportazione.gs: server e script
+//  devono vedere la stessa finestra.
 // ============================================================
 
 const GIORNI_LETTURA_DEFAULT = [19, 20, 21, 22, 23, 24];
@@ -971,6 +985,35 @@ function normIntestazione(s) {
   return (s || '').toString().toLowerCase()
     .replace(/[àáâ]/g,'a').replace(/[èé]/g,'e').replace(/[ìí]/g,'i')
     .replace(/[òó]/g,'o').replace(/[ùú]/g,'u').replace(/[^a-z0-9]/g,'');
+}
+
+// Il valore dentro la stringa vuole la virgola: 215.9 -> "215,9"
+function valoreStringa(v) {
+  if (v === null || v === undefined || v === '') return '';
+  const n = Math.round(Number(v) * 1000) / 1000;   // toglie il rumore dei float
+  return String(n).replace('.', ',');
+}
+
+/**
+ * Stringa di importazione, stesso tracciato della formula nel file importazioni:
+ *   =CONCATENA(N;O;P;Q;R;S;V;U;T;W;X;Y)
+ *   CODICE_IT ; COD_ELEM ; FASCIA ; ; AAAAMMGG ; ; ; LETTURA ;
+ * dataCampagna arriva come 'yyyy-MM-dd' ed e' UGUALE per tutte le righe del
+ * mese: non e' la data in cui l'operaio ha letto.
+ */
+function costruisciStringa(codiceIT, codElem, fascia, dataCampagna, valore) {
+  const aaaammgg = (dataCampagna || oggiItalia()).replace(/-/g, '');
+  return [
+    codiceIT || '',
+    codElem || '',
+    fascia || '',
+    '',
+    aaaammgg,
+    '',
+    '',
+    valoreStringa(valore),
+    '',
+  ].join(';');
 }
 
 // Individua le colonne per nome, con posizione di riserva
@@ -1003,43 +1046,104 @@ const COL_CONTATORI = {
   statoMerge:{ nome: 'StatoMerge',          pos: 15 },
 };
 
-// Legge la configurazione letture dal foglio Config (assente = default)
+// "19,20,21 22-23" -> [19,20,21,22,23]
+function parseGiorni(v) {
+  const parsed = (v || '').toString().split(/[^0-9]+/)
+    .map(x => parseInt(x, 10))
+    .filter(n => !isNaN(n) && n >= 1 && n <= 31);
+  return parsed.length ? Array.from(new Set(parsed)).sort((a, b) => a - b) : null;
+}
+
+// Mese successivo a 'yyyy-MM'
+function meseDopo(mese) {
+  let a = parseInt(mese.slice(0, 4), 10);
+  let m = parseInt(mese.slice(5, 7), 10) + 1;
+  if (m > 12) { m = 1; a++; }
+  return a + '-' + String(m).padStart(2, '0');
+}
+
+// Legge la configurazione letture dal foglio Config (assente = default).
+// I giorni possono essere definiti per singolo mese: la chiave del mese
+// vince sul default generico.
 async function configLetture(sheets) {
-  let giorni = GIORNI_LETTURA_DEFAULT.slice();
+  const oggi       = oggiItalia();                    // yyyy-MM-dd
+  const meseOggi   = oggi.slice(0, 7);
+  const giornoOggi = parseInt(oggi.slice(8, 10), 10);
+
+  let generici     = null;
   let sempreAperte = false;
+  const perMese    = {};   // '2026-08' -> [giorni]
+  const campagne   = {};   // '2026-08' -> '2026-08-24'
+
   try {
     const rows = await leggi(sheets, SH.CONFIG);
     rows.slice(1).forEach(r => {
       const k = (r[0] || '').toString().trim().toUpperCase();
       const v = (r[1] || '').toString().trim();
-      if (k === 'GIORNI_LETTURA' && v) {
-        const parsed = v.split(/[^0-9]+/).map(x => parseInt(x, 10))
-          .filter(n => !isNaN(n) && n >= 1 && n <= 31);
-        if (parsed.length) giorni = parsed;
+      if (!k || !v) return;
+
+      if (k === 'LETTURE_SEMPRE_APERTE') {
+        sempreAperte = v.toUpperCase() === 'SI';
+      } else if (k === 'GIORNI_LETTURA') {
+        generici = parseGiorni(v);
+      } else if (k.indexOf('GIORNI_LETTURA_') === 0) {
+        const m = k.slice('GIORNI_LETTURA_'.length);
+        if (/^\d{4}-\d{2}$/.test(m)) {
+          const g = parseGiorni(v);
+          if (g) perMese[m] = g;
+        }
+      } else if (k.indexOf('DATA_CAMPAGNA_') === 0) {
+        const m = k.slice('DATA_CAMPAGNA_'.length);
+        if (/^\d{4}-\d{2}$/.test(m)) campagne[m] = v;
       }
-      if (k === 'LETTURE_SEMPRE_APERTE') sempreAperte = v.toUpperCase() === 'SI';
     });
   } catch (e) {
     console.warn('Foglio Config assente o illeggibile — uso i giorni di default');
   }
-  giorni = Array.from(new Set(giorni)).sort((a, b) => a - b);
 
-  const oggi        = oggiItalia();                    // yyyy-MM-dd
-  const giornoOggi  = parseInt(oggi.slice(8, 10), 10);
-  const apertoOggi  = sempreAperte || giorni.indexOf(giornoOggi) >= 0;
-
-  // Prossimo giorno utile: nel mese corrente se c'è, altrimenti il primo del mese dopo
-  let prossimo = giorni.find(g => g >= giornoOggi);
-  let prossimaFinestra = '';
-  if (prossimo !== undefined) {
-    prossimaFinestra = String(prossimo).padStart(2, '0') + '/' + oggi.slice(5, 7);
-  } else if (giorni.length) {
-    const m = parseInt(oggi.slice(5, 7), 10);
-    const mm = m === 12 ? 1 : m + 1;
-    prossimaFinestra = String(giorni[0]).padStart(2, '0') + '/' + String(mm).padStart(2, '0');
+  // Giorni validi per un dato mese, con la loro provenienza
+  function giorniDi(mese) {
+    if (perMese[mese]) return { giorni: perMese[mese], fonte: 'GIORNI_LETTURA_' + mese };
+    if (generici)      return { giorni: generici,      fonte: 'GIORNI_LETTURA' };
+    return { giorni: GIORNI_LETTURA_DEFAULT.slice(), fonte: 'default nel codice' };
   }
 
-  return { giorni, sempreAperte, apertoOggi, oggi, giornoOggi, prossimaFinestra };
+  const corrente   = giorniDi(meseOggi);
+  const giorni     = corrente.giorni;
+  const apertoOggi = sempreAperte || giorni.indexOf(giornoOggi) >= 0;
+
+  // Prossimo giorno utile: in questo mese se ce n'è ancora uno, altrimenti
+  // il primo del mese dopo — che può avere una finestra diversa.
+  let prossimaFinestra = '';
+  const prossimo = giorni.find(g => g >= giornoOggi);
+  if (prossimo !== undefined) {
+    prossimaFinestra = String(prossimo).padStart(2, '0') + '/' + meseOggi.slice(5, 7);
+  } else {
+    const mp = meseDopo(meseOggi);
+    const gp = giorniDi(mp).giorni;
+    if (gp.length) prossimaFinestra = String(gp[0]).padStart(2, '0') + '/' + mp.slice(5, 7);
+  }
+
+  // Data di campagna del mese: se non configurata, l'ultimo giorno della finestra
+  let dataCampagna = campagne[meseOggi] || '';
+  let fonteData    = dataCampagna ? ('DATA_CAMPAGNA_' + meseOggi) : '';
+  if (!dataCampagna && giorni.length) {
+    dataCampagna = meseOggi + '-' + String(giorni[giorni.length - 1]).padStart(2, '0');
+    fonteData    = 'ultimo giorno della finestra';
+  }
+
+  return {
+    giorni,
+    fonteGiorni: corrente.fonte,
+    mesiConfigurati: Object.keys(perMese).sort(),
+    dataCampagna,
+    fonteData,
+    sempreAperte,
+    apertoOggi,
+    oggi,
+    giornoOggi,
+    prossimaFinestra,
+  };
 }
 
 // GET /config-letture
@@ -1071,7 +1175,10 @@ app.get('/letture-dati', async (req, res) => {
     const C = mappaColonne(rCon[0], COL_CONTATORI);
     const g = (r, i) => (i >= 0 && r[i] !== undefined && r[i] !== null) ? r[i].toString().trim() : '';
 
-    // Storico letture indicizzato per contatore (l'ultima riga vince)
+    // Storico letture indicizzato per contatore.
+    // L'ultima lettura di riferimento e' l'ultima riga di un mese DIVERSO da
+    // quello corrente: la lettura appena inserita non deve diventare la
+    // "precedente" di se stessa. Stessa regola usata da /salva-lettura.
     const ultimaDaLetture = {};
     const lettureMese     = [];
     const meseCorrente    = cfg.oggi.slice(0, 7);
@@ -1079,11 +1186,14 @@ app.get('/letture-dati', async (req, res) => {
     rLet.slice(1).forEach(r => {
       const idc = (r[2] || '').toString().trim();
       if (!idc) return;
-      ultimaDaLetture[idc] = {
-        valore: numLettura(r[8]),
-        data:   (r[1] || '').toString().trim(),
-      };
-      if ((r[12] || '').toString().trim() === meseCorrente) {
+      const meseRiga = (r[12] || '').toString().trim();
+
+      if (meseRiga !== meseCorrente) {
+        ultimaDaLetture[idc] = {
+          valore: numLettura(r[8]),
+          data:   (r[1] || '').toString().trim(),
+        };
+      } else {
         lettureMese.push({
           id:          (r[0] || '').toString(),
           dataOra:     (r[1] || '').toString(),
@@ -1093,6 +1203,7 @@ app.get('/letture-dati', async (req, res) => {
           evento:      (r[10] || '').toString(),
           commenti:    (r[11] || '').toString(),
           consumo:     numLettura(r[16]),
+          stringa:     (r[17] || '').toString(),
         });
       }
     });
@@ -1174,6 +1285,12 @@ app.post('/salva-lettura', async (req, res) => {
     const eventoFinale = EVENTI_LETTURA.indexOf((evento || '').toUpperCase()) >= 0
       ? evento.toUpperCase() : EVENTI_LETTURA[0];
 
+    // La stringa nasce insieme alla riga, con la data di campagna del mese
+    const stringa = costruisciStringa(
+      g(riga, C.codiceIT), g(riga, C.codElem), g(riga, C.fascia),
+      cfg.dataCampagna, val
+    );
+
     // Riga già presente per questo contatore nel mese corrente?
     const idxEsistente = rLet.findIndex((r, i) =>
       i > 0 &&
@@ -1199,12 +1316,13 @@ app.post('/salva-lettura', async (req, res) => {
       lon != null ? lon : '',
       precedente !== null ? precedente : '',
       consumo,
+      stringa,
     ];
 
     if (idxEsistente > 0) {
       await sheets.spreadsheets.values.update({
         spreadsheetId: SHEET_ID,
-        range: `${SH.LETTURE}!A${idxEsistente+1}:Q${idxEsistente+1}`,
+        range: `${SH.LETTURE}!A${idxEsistente+1}:R${idxEsistente+1}`,
         valueInputOption: 'RAW', requestBody: { values: [valori] },
       });
     } else {
@@ -1221,7 +1339,67 @@ app.post('/salva-lettura', async (req, res) => {
       aggiornata: idxEsistente > 0,
       precedente,
       consumo,
+      stringa,
       calo: (precedente !== null && val < precedente),
+    });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+/**
+ * GET /rigenera-stringhe?mese=2026-07
+ * Ricalcola la colonna R per tutte le letture di un mese usando la data di
+ * campagna configurata adesso. Serve solo se DATA_CAMPAGNA viene cambiata
+ * dopo che le letture sono già state raccolte: senza questo, le stringhe
+ * resterebbero con la data vecchia.
+ */
+app.get('/rigenera-stringhe', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const cfg    = await configLetture(sheets);
+    const mese   = (req.query.mese || cfg.oggi.slice(0, 7)).toString().trim();
+    if (!/^\d{4}-\d{2}$/.test(mese)) return res.json({ ok: false, errore: 'mese non valido (AAAA-MM)' });
+
+    // La data di campagna del mese richiesto può non essere quella corrente
+    let dataCampagna = cfg.dataCampagna;
+    if (mese !== cfg.oggi.slice(0, 7)) {
+      const rows = await leggi(sheets, SH.CONFIG).catch(() => []);
+      const riga = rows.slice(1).find(r =>
+        (r[0] || '').toString().trim().toUpperCase() === 'DATA_CAMPAGNA_' + mese);
+      if (riga && riga[1]) dataCampagna = riga[1].toString().trim();
+      else return res.json({ ok: false, errore: 'DATA_CAMPAGNA_' + mese + ' non presente nel foglio Config' });
+    }
+
+    const rLet = await leggi(sheets, SH.LETTURE).catch(() => []);
+    const dati = [];
+    rLet.forEach((r, i) => {
+      if (i === 0) return;
+      if ((r[12] || '').toString().trim() !== mese) return;
+      dati.push({
+        riga: i + 1,
+        stringa: costruisciStringa(
+          (r[4] || '').toString().trim(),
+          (r[5] || '').toString().trim(),
+          (r[6] || '').toString().trim(),
+          dataCampagna,
+          numLettura(r[8])
+        ),
+      });
+    });
+
+    if (!dati.length) return res.json({ ok: true, mese, dataCampagna, rigenerate: 0 });
+
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SHEET_ID,
+      requestBody: {
+        valueInputOption: 'RAW',
+        data: dati.map(d => ({ range: `${SH.LETTURE}!R${d.riga}`, values: [[d.stringa]] })),
+      },
+    });
+
+    res.json({
+      ok: true, mese, dataCampagna,
+      rigenerate: dati.length,
+      esempi: dati.slice(0, 5).map(d => d.stringa),
     });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
