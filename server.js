@@ -321,12 +321,25 @@ app.post('/crea-intervento', async (req, res) => {
     if (chkRows.length > 0) {
       await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: SH.CHECKLIST, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: chkRows } });
     }
+// ── Notifica push ──
+    // Se l'intervento è nel Contenitore (nessun operaio) → avvisa tutti e 4
+    // gli operai, così qualcuno lo prende in carico. Altrimenti avvisa il singolo.
     if (statoIniziale !== 'DaAssegnare') {
-      const rImp   = await leggi(sheets, SH.IMPIANTI);
-      const impRow = rImp.slice(1).find(r=>r[0]===codiceImpianto);
+      const rImp    = await leggi(sheets, SH.IMPIANTI);
+      const impRow  = rImp.slice(1).find(r => r[0] === codiceImpianto);
       const nomeImp = impRow ? impRow[1] : codiceImpianto;
-      const dataFmt = new Date(dataPrevista+'T00:00:00').toLocaleDateString('it-IT',{weekday:'short',day:'numeric',month:'short'});
-      await pushNotifica(sheets, [operaio], '📋 Nuovo intervento assegnato', `${nomeImp} — ${tipoVisita} · ${dataFmt}`);
+      const dataFmt = new Date(dataPrevista + 'T00:00:00').toLocaleDateString('it-IT', { weekday:'short', day:'numeric', month:'short' });
+
+      const inContenitore = !operaio || operaio.toString().trim() === '';
+      if (inContenitore) {
+        await pushNotifica(sheets, ['Matteo', 'Stefano', 'Michele', 'Ezio'],
+          '📦 Nuova richiesta nel contenitore',
+          `${nomeImp} — ${tipoVisita} · ${dataFmt} · da prendere in carico`);
+      } else {
+        await pushNotifica(sheets, [operaio],
+          '📋 Nuovo intervento assegnato',
+          `${nomeImp} — ${tipoVisita} · ${dataFmt}`);
+      }
     }
     res.json({ ok: true, id });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
