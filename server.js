@@ -49,6 +49,17 @@ if (oneSignalPronto) {
 // operai: array di nomi operaio (es. ['Matteo'])
 async function pushNotifica(sheets, operai, titolo, corpo) {
   if (!oneSignalPronto) { console.warn('pushNotifica: OneSignal non configurato'); return; }
+
+  // Scarta destinatari vuoti/nulli (es. interventi nel Contenitore senza operaio):
+  // inviare a external_id vuoto fa rifiutare la richiesta da OneSignal
+  // ("alias_id's must be an array of non empty strings").
+  const destinatari = (Array.isArray(operai) ? operai : [operai])
+    .filter(o => o && o.toString().trim() !== '' && o.toString().trim() !== 'DaAssegnare');
+  if (destinatari.length === 0) {
+    console.log('pushNotifica: nessun destinatario valido, invio saltato');
+    return;
+  }
+
   try {
     const resp = await fetch('https://onesignal.com/api/v1/notifications', {
       method: 'POST',
@@ -58,7 +69,7 @@ async function pushNotifica(sheets, operai, titolo, corpo) {
       },
       body: JSON.stringify({
         app_id: ONESIGNAL_APP_ID,
-        include_aliases: { external_id: operai },
+        include_aliases: { external_id: destinatari },
         target_channel: 'push',
         headings: { en: titolo, it: titolo },
         contents: { en: corpo, it: corpo }
@@ -68,7 +79,7 @@ async function pushNotifica(sheets, operai, titolo, corpo) {
     if (data.errors) {
       console.warn('OneSignal errori:', JSON.stringify(data.errors));
     } else {
-      console.log('OneSignal inviata a', operai.join(','), '— id:', data.id || '?');
+      console.log('OneSignal inviata a', destinatari.join(','), '— id:', data.id || '?');
     }
   } catch (e) {
     console.warn('pushNotifica (OneSignal) error:', e.message);
