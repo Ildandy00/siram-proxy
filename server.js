@@ -1312,7 +1312,7 @@ app.post('/salva-lettura', async (req, res) => {
     // La stringa nasce insieme alla riga, con la data di campagna del mese
     const stringa = costruisciStringa(
       g(riga, C.codiceIT), g(riga, C.codElem), g(riga, C.fascia),
-      cfg.dataCampagna, val
+      oggiItalia() val
     );
 
     // Riga già presente per questo contatore nel mese corrente?
@@ -1376,6 +1376,12 @@ app.post('/salva-lettura', async (req, res) => {
  * dopo che le letture sono già state raccolte: senza questo, le stringhe
  * resterebbero con la data vecchia.
  */
+// Estrae yyyy-MM-dd dal campo DataOra tipo "25/08/2026, 11:42"
+function dataRealeRiga(dataOra) {
+  const m = (dataOra || '').toString().match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  return m ? m[3] + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0') : null;
+}
+
 app.get('/rigenera-stringhe', async (req, res) => {
   try {
     const sheets = await getSheets();
@@ -1383,28 +1389,20 @@ app.get('/rigenera-stringhe', async (req, res) => {
     const mese   = (req.query.mese || cfg.oggi.slice(0, 7)).toString().trim();
     if (!/^\d{4}-\d{2}$/.test(mese)) return res.json({ ok: false, errore: 'mese non valido (AAAA-MM)' });
 
-    // La data di campagna del mese richiesto può non essere quella corrente
-    let dataCampagna = cfg.dataCampagna;
-    if (mese !== cfg.oggi.slice(0, 7)) {
-      const rows = await leggi(sheets, SH.CONFIG).catch(() => []);
-      const riga = rows.slice(1).find(r =>
-        (r[0] || '').toString().trim().toUpperCase() === 'DATA_CAMPAGNA_' + mese);
-      if (riga && riga[1]) dataCampagna = riga[1].toString().trim();
-      else return res.json({ ok: false, errore: 'DATA_CAMPAGNA_' + mese + ' non presente nel foglio Config' });
-    }
-
     const rLet = await leggi(sheets, SH.LETTURE).catch(() => []);
     const dati = [];
     rLet.forEach((r, i) => {
       if (i === 0) return;
       if ((r[12] || '').toString().trim() !== mese) return;
+      // ogni riga porta la sua data reale di lettura; se manca, ripiega sul mese
+      const dr = dataRealeRiga(r[1]) || (mese + '-01');
       dati.push({
         riga: i + 1,
         stringa: costruisciStringa(
           (r[4] || '').toString().trim(),
           (r[5] || '').toString().trim(),
           (r[6] || '').toString().trim(),
-          dataCampagna,
+          dr,
           numLettura(r[8])
         ),
       });
