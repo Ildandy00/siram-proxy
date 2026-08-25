@@ -1312,7 +1312,7 @@ app.post('/salva-lettura', async (req, res) => {
     // La stringa nasce insieme alla riga, con la data di campagna del mese
     const stringa = costruisciStringa(
       g(riga, C.codiceIT), g(riga, C.codElem), g(riga, C.fascia),
-      oggiItalia() val
+      oggiItalia(), val
     );
 
     // Riga già presente per questo contatore nel mese corrente?
