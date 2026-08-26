@@ -393,7 +393,11 @@ app.post('/notifica-fmp', async (req, res) => {
     const rImp   = await leggi(sheets, SH.IMPIANTI);
     const impRow = rImp.slice(1).find(r=>r[0]===codiceImpianto);
     const nome   = impRow ? impRow[1] : codiceImpianto;
-    await pushNotifica(sheets, [operaio], '🚨 Nuova segnalazione FMP', `${nome} — ${note.slice(0,80)}`);
+    // Se la segnalazione non ha un operaio assegnato (es. impianto senza
+    // operaio di default), avvisa tutti e 4 così qualcuno la prende in carico.
+    const inContenitore = !operaio || operaio.toString().trim() === '' || operaio.toString().trim() === 'DaAssegnare';
+    const destinatari = inContenitore ? ['Matteo', 'Stefano', 'Michele', 'Ezio'] : [operaio];
+    await pushNotifica(sheets, destinatari, '🚨 Nuova segnalazione FMP', `${nome} — ${note.slice(0,80)}`);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
