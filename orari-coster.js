@@ -149,6 +149,12 @@ module.exports = function mountOrariCoster(app) {
     catalogTime: null,
     jobs: new Map(),        // id → job
     pinFailures: new Map(), // ip → { count, first }
+    // Straordinari: la verità sta sul PC (SQLite locale dell'agente).
+    // Qui: ultima fotografia inviata dall'agente + richieste non ancora confermate.
+    straordinari: [],
+    straordinariHash: null,
+    straordinariTime: null,
+    straOps: new Map(),     // op_id → { op_id, tipo:'crea'|'annulla', ... , creato }
   };
 
   // ----------------------------------------------------------
@@ -290,12 +296,24 @@ module.exports = function mountOrariCoster(app) {
 
     const needCatalog = !state.catalogHash || body.catalog_hash !== state.catalogHash;
 
+    // Straordinari: conferme, fotografia, richieste pendenti
+    for (const opId of Array.isArray(body.ack_ops) ? body.ack_ops : []) {
+      state.straOps.delete(String(opId));
+    }
+    if (Array.isArray(body.straordinari)) {
+      state.straordinari = body.straordinari.slice(0, 500);
+      state.straordinariHash = String(body.straordinari_hash || '');
+      state.straordinariTime = Date.now();
+    }
+    const needStra = !state.straordinariHash || body.straordinari_hash !== state.straordinariHash;
+    const straOps = [...state.straOps.values()].sort((a, b) => a.creato - b.creato).slice(0, 20);
+
     const next = [...state.jobs.values()]
       .filter((j) => j.stato === 'in_coda')
       .sort((a, b) => a.creato - b.creato)[0];
 
     let job = null;
-    if (next && !needCatalog) {
+    if (next && !needCatalog && !straOps.length) {   // prima si registrano gli straordinari
       setState(next, 'preso', 'Presa in carico dall\'agente.');
       job = {
         id: next.id,
@@ -305,7 +323,12 @@ module.exports = function mountOrariCoster(app) {
       };
     }
 
-    res.json({ need_catalog: needCatalog, job });
+    res.json({
+      need_catalog: needCatalog,
+      job,
+      need_straordinari: needStra,
+      straordinari_ops: straOps,
+    });
   });
 
   agent.post('/catalog', (req, res) => {
@@ -500,6 +523,154 @@ module.exports = function mountOrariCoster(app) {
       job.aggiornato = Date.now();
     }
     res.json(jobPublic(job));
+  });
+
+
+  // ---------------- STRAORDINARI ----------------
+  // Il PC è l'unico che li scrive e ripristina: qui si inoltrano le richieste
+  // (finché l'agente non le conferma) e si mostra la sua fotografia.
+
+  const STRA_MAX_FASCE = 4;
+  const STRA_MAX_RANGE_DAYS = 7;
+  const STRA_MAX_DAYS_AHEAD = 90;
+  const STRA_ACTIVE = new Set(['programmato', 'applicato']);
+
+  const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  const fasceText = (f) => f.map((x) => `${hhmm(x.start)}-${hhmm(x.end)} ${Number(x.temp).toFixed(1)}°C`).join(', ');
+
+  function parseIsoDate(v) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(v || ''))) return null;
+    const d = new Date(`${v}T12:00:00Z`);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const isoOf = (d) => d.toISOString().slice(0, 10);
+
+  function validateFasce(raw) {
+    if (!Array.isArray(raw) || !raw.length) throw new Error('Inserisci almeno una fascia oraria.');
+    if (raw.length > STRA_MAX_FASCE) throw new Error(`Al massimo ${STRA_MAX_FASCE} fasce.`);
+    const out = raw.map((f, n) => {
+      const start = optionalInt(f && f.start, 0, 1439);
+      const end = optionalInt(f && f.end, 0, 1439);
+      if (!start.ok || !end.ok || start.value === null || end.value === null) throw new Error(`Fascia ${n + 1}: orari non validi.`);
+      if (end.value <= start.value) throw new Error(`Fascia ${n + 1}: l'ora finale deve essere successiva a quella iniziale.`);
+      const temp = Number(String(f.temp).replace(',', '.'));
+      if (!Number.isFinite(temp) || temp < HARD_T_MIN || temp > HARD_T_MAX) {
+        throw new Error(`Fascia ${n + 1}: temperatura non scrivibile (${HARD_T_MIN}…${HARD_T_MAX} °C).`);
+      }
+      return { start: start.value, end: end.value, temp: Math.round(temp * 10) / 10 };
+    }).sort((a, b) => a.start - b.start);
+    for (let i = 1; i < out.length; i++) {
+      if (out[i].start < out[i - 1].end) throw new Error('Le fasce si sovrappongono.');
+    }
+    return out;
+  }
+
+  web.get('/straordinari', (req, res) => {
+    const ops = [...state.straOps.values()];
+    const cancelling = new Set(ops.filter((o) => o.tipo === 'annulla').map((o) => o.id));
+    const pending = ops.filter((o) => o.tipo === 'crea').map((o) => ({
+      id: o.id,
+      schedule_id: o.schedule_id,
+      data: o.data,
+      giorno: o.giorno,
+      fasce: o.fasce,
+      fasce_testo: fasceText(o.fasce),
+      note: o.note,
+      etichetta: o.etichetta,
+      stato: 'in_attesa_agente',
+      messaggio: 'In attesa che il PC lo registri.',
+      creato: o.creato,
+    }));
+    const lista = state.straordinari.map((x) => (cancelling.has(x.id) ? { ...x, annulla_in_invio: true } : x));
+    res.json({
+      lista: [...pending, ...lista],
+      aggiornato: state.straordinariTime,
+      agente_online: Date.now() - state.agent.lastSeen < AGENT_ONLINE_MS,
+    });
+  });
+
+  web.post('/straordinari', (req, res) => {
+    const { schedule_id: scheduleId, data_dal: dal, data_al: al, fasce, note } = req.body || {};
+    if (!state.catalog) return res.status(503).json({ error: 'Anagrafica non ancora disponibile.' });
+    const etichetta = labelFor(scheduleId);
+    if (!etichetta) return res.status(400).json({ error: 'Schedule non presente in anagrafica.' });
+
+    const d1 = parseIsoDate(dal);
+    const d2 = al ? parseIsoDate(al) : d1;
+    if (!d1 || !d2) return res.status(400).json({ error: 'Date non valide.' });
+    if (d2 < d1) return res.status(400).json({ error: 'La data finale è prima di quella iniziale.' });
+    const giorni = Math.round((d2 - d1) / 86400000) + 1;
+    if (giorni > STRA_MAX_RANGE_DAYS) {
+      return res.status(400).json({ error: `Al massimo ${STRA_MAX_RANGE_DAYS} giorni per richiesta.` });
+    }
+    let oggiIso;
+    try { oggiIso = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Rome' }); } catch (e) { oggiIso = ''; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(oggiIso)) oggiIso = new Date().toISOString().slice(0, 10);
+    const oggi = parseIsoDate(oggiIso);
+    if (d1 < oggi) return res.status(400).json({ error: 'La data è già passata.' });
+    if (d2 > new Date(oggi.getTime() + STRA_MAX_DAYS_AHEAD * 86400000)) {
+      return res.status(400).json({ error: `Date oltre ${STRA_MAX_DAYS_AHEAD} giorni.` });
+    }
+
+    let clean;
+    try { clean = validateFasce(fasce); } catch (err) { return res.status(400).json({ error: err.message }); }
+
+    const dates = [];
+    for (let i = 0; i < giorni; i++) dates.push(isoOf(new Date(d1.getTime() + i * 86400000)));
+
+    const busy = new Set([
+      ...state.straordinari.filter((x) => String(x.schedule_id) === String(scheduleId) && STRA_ACTIVE.has(x.stato)).map((x) => x.data),
+      ...[...state.straOps.values()].filter((o) => o.tipo === 'crea' && String(o.schedule_id) === String(scheduleId)).map((o) => o.data),
+    ]);
+    const clash = dates.filter((d) => busy.has(d));
+    if (clash.length) {
+      return res.status(409).json({ error: `Esiste già uno straordinario su questo schedule il ${clash.join(', ')}.` });
+    }
+
+    const GG = ['domenica', 'lunedì', 'martedì', 'mercoledì', 'giovedì', 'venerdì', 'sabato'];
+    const now = Date.now();
+    const created = dates.map((d, i) => {
+      const op = {
+        op_id: `op${newId()}`,
+        tipo: 'crea',
+        id: `st${newId()}`,
+        schedule_id: Number.isFinite(Number(scheduleId)) ? Number(scheduleId) : scheduleId,
+        data: d,
+        giorno: GG[parseIsoDate(d).getUTCDay()],
+        fasce: clean,
+        note: String(note || '').slice(0, 300),
+        etichetta,
+        creato: now + i,
+        richiesto_da: req.orariIp,
+      };
+      state.straOps.set(op.op_id, op);
+      return op.id;
+    });
+    console.log(`[orari] straordinari richiesti ${dates.join(',')} ${etichetta.impianto} / ${etichetta.schedule}: ${fasceText(clean)}`);
+    res.status(201).json({ ok: true, ids: created });
+  });
+
+  web.post('/straordinari/:id/annulla', (req, res) => {
+    const id = String(req.params.id);
+    for (const [opId, op] of state.straOps) {
+      if (op.tipo === 'crea' && op.id === id) {
+        state.straOps.delete(opId);
+        return res.json({ ok: true, messaggio: 'Annullato prima che il PC lo registrasse.' });
+      }
+    }
+    const item = state.straordinari.find((x) => x.id === id);
+    if (!item) return res.status(404).json({ error: 'Straordinario non trovato.' });
+    if (!STRA_ACTIVE.has(item.stato) || item.annulla) {
+      return res.status(409).json({ error: `Non annullabile (stato: ${item.stato}).` });
+    }
+    const opId = `op${newId()}`;
+    state.straOps.set(opId, { op_id: opId, tipo: 'annulla', id, creato: Date.now() });
+    res.json({
+      ok: true,
+      messaggio: item.stato === 'applicato'
+        ? 'Annullamento inviato: il PC ripristinerà il programma ordinario.'
+        : 'Annullamento inviato al PC.',
+    });
   });
 
   router.use('/', web);
