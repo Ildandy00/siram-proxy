@@ -38,10 +38,8 @@ const PIN_MAX_FAILURES = 8;
 const PIN_WINDOW_MS = 15 * 60 * 1000;
 
 const MAX_ROWS = 8;
-// Limiti di default se l'agente non li invia; normalmente arrivano per ogni
-// schedule nel catalogo (ambiente 5-35, ACS 10-80, mandata 10-90, comandi liberi).
-const DEFAULT_T_MIN = 5;
-const DEFAULT_T_MAX = 35;
+// Unico controllo sulla temperatura: valore scrivibile nel registro Coster
+// (raw = °C*10 + 250). Nessun limite per tipo di schedule.
 const HARD_T_MIN = -25;
 const HARD_T_MAX = 100;
 
@@ -87,7 +85,7 @@ function optionalInt(v, lo, hi) {
 }
 
 /** Stesse regole dell'agente (che comunque rivalida tutto). */
-function validateChanges(raw, tMin = DEFAULT_T_MIN, tMax = DEFAULT_T_MAX) {
+function validateChanges(raw, tMin = HARD_T_MIN, tMax = HARD_T_MAX) {
   if (!Array.isArray(raw) || raw.length === 0) throw new Error('Nessuna modifica impostata.');
   if (raw.length > MAX_ROWS) throw new Error('Troppe righe.');
 
@@ -113,7 +111,7 @@ function validateChanges(raw, tMin = DEFAULT_T_MIN, tMax = DEFAULT_T_MAX) {
     if (item.temp !== null && item.temp !== undefined && item.temp !== '') {
       temp = Number(String(item.temp).replace(',', '.'));
       if (!Number.isFinite(temp) || temp < tMin || temp > tMax) {
-        throw new Error(`Riga ${row + 1}: temperatura fuori dal range ${tMin}-${tMax} °C per questo schedule.`);
+        throw new Error(`Riga ${row + 1}: temperatura non scrivibile nel registro Coster (${tMin}…${tMax} °C).`);
       }
       temp = Math.round(temp * 10) / 10;
     }
@@ -189,14 +187,6 @@ module.exports = function mountOrariCoster(app) {
       out.storia = job.storia;
     }
     return out;
-  }
-
-  function limitsFor(scheduleId) {
-    const sch = state.catalog && state.catalog.schedules.find((s) => String(s.id) === String(scheduleId));
-    let lo = Number(sch && sch.t_min);
-    let hi = Number(sch && sch.t_max);
-    if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo >= hi) { lo = DEFAULT_T_MIN; hi = DEFAULT_T_MAX; }
-    return [Math.max(lo, HARD_T_MIN), Math.min(hi, HARD_T_MAX)];
   }
 
   function labelFor(scheduleId) {
@@ -454,7 +444,7 @@ module.exports = function mountOrariCoster(app) {
     let changes = null;
     if (tipo === 'modifica') {
       try {
-        changes = validateChanges(modifiche, ...limitsFor(scheduleId));
+        changes = validateChanges(modifiche);
       } catch (err) {
         return res.status(400).json({ error: err.message });
       }
