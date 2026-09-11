@@ -4,7 +4,8 @@ const { google } = require('googleapis');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
-
+require('./orari-coster')(app);
+  
 const SHEET_ID = process.env.SHEET_ID || '1JsQz8FiUMFGjFQ5tuodgjexxe1hE8UE87ORFDi_geWE';
 
 const SH = {
