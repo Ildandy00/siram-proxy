@@ -37,9 +37,12 @@ const MAX_ACTIVE_JOBS = 10;
 const PIN_MAX_FAILURES = 8;
 const PIN_WINDOW_MS = 15 * 60 * 1000;
 
+// Righe per famiglia di programma orario: "passi" = 8, "termostato" = 15.
+// Il numero vero arriva dall'anagrafica insieme allo schedule.
 const MAX_ROWS = 8;
-// Unico controllo sulla temperatura: valore scrivibile nel registro Coster
-// (raw = °C*10 + 250). Nessun limite per tipo di schedule.
+const MAX_ROWS_ANY = 15;
+// Unico controllo sulla temperatura: valore scrivibile nel registro Coster.
+// Nessun limite per tipo di schedule.
 const HARD_T_MIN = -25;
 const HARD_T_MAX = 100;
 
@@ -85,15 +88,16 @@ function optionalInt(v, lo, hi) {
 }
 
 /** Stesse regole dell'agente (che comunque rivalida tutto). */
-function validateChanges(raw, tMin = HARD_T_MIN, tMax = HARD_T_MAX) {
+function validateChanges(raw, righe = MAX_ROWS, tMin = HARD_T_MIN, tMax = HARD_T_MAX) {
+  const nRighe = Number.isInteger(righe) && righe > 0 && righe <= MAX_ROWS_ANY ? righe : MAX_ROWS;
   if (!Array.isArray(raw) || raw.length === 0) throw new Error('Nessuna modifica impostata.');
-  if (raw.length > MAX_ROWS) throw new Error('Troppe righe.');
+  if (raw.length > nRighe) throw new Error('Troppe righe.');
 
   const seen = new Set();
   return raw.map((item) => {
     if (!item || typeof item !== 'object') throw new Error('Formato modifiche non valido.');
     const row = Number(item.row);
-    if (!isIntIn(row, 0, MAX_ROWS - 1)) throw new Error('Riga non valida.');
+    if (!isIntIn(row, 0, nRighe - 1)) throw new Error('Riga non valida.');
     if (seen.has(row)) throw new Error(`Riga ${row + 1} ripetuta.`);
     seen.add(row);
 
@@ -155,6 +159,9 @@ module.exports = function mountOrariCoster(app) {
     straordinariHash: null,
     straordinariTime: null,
     straOps: new Map(),     // op_id → { op_id, tipo:'crea'|'annulla', ... , creato }
+    // Righe viste davvero su Coster nell'ultima lettura (schedule_id → n).
+    // Alcune centraline espongono più righe di quelle previste dalla famiglia.
+    righeViste: new Map(),
   };
 
   // ----------------------------------------------------------
@@ -195,10 +202,31 @@ module.exports = function mountOrariCoster(app) {
     return out;
   }
 
+  /** L'agente riporta quante righe ha davvero letto: si tiene da conto. */
+  function ricordaRighe(job, dati) {
+    const n = Number(dati && dati.righe);
+    if (!job || !Number.isInteger(n) || n < 1 || n > MAX_ROWS_ANY) return;
+    state.righeViste.set(String(job.schedule_id), n);
+  }
+
+  function findSchedule(scheduleId) {
+    const cat = state.catalog;
+    if (!cat) return null;
+    return cat.schedules.find((s) => String(s.id) === String(scheduleId)) || null;
+  }
+
+  function righeDi(scheduleId) {
+    const sch = findSchedule(scheduleId);
+    const n = Number(sch && sch.righe);
+    const base = Number.isInteger(n) && n > 0 && n <= MAX_ROWS_ANY ? n : MAX_ROWS;
+    const viste = Number(state.righeViste.get(String(scheduleId)));
+    return Number.isInteger(viste) && viste > base ? Math.min(viste, MAX_ROWS_ANY) : base;
+  }
+
   function labelFor(scheduleId) {
     const cat = state.catalog;
     if (!cat) return null;
-    const sch = cat.schedules.find((s) => String(s.id) === String(scheduleId));
+    const sch = findSchedule(scheduleId);
     if (!sch) return null;
     const imp = cat.impianti.find((i) => i.ref === sch.impianto_ref) || {};
     const com = cat.commesse.find((c) => c.ref === imp.commessa_ref) || {};
@@ -363,6 +391,7 @@ module.exports = function mountOrariCoster(app) {
     }
 
     const msg = String(messaggio || '').slice(0, 4000);
+    ricordaRighe(job, dati);
 
     if (FINAL_STATES.has(stato)) {
       setState(job, stato, msg);
@@ -467,7 +496,7 @@ module.exports = function mountOrariCoster(app) {
     let changes = null;
     if (tipo === 'modifica') {
       try {
-        changes = validateChanges(modifiche);
+        changes = validateChanges(modifiche, righeDi(scheduleId));
       } catch (err) {
         return res.status(400).json({ error: err.message });
       }
