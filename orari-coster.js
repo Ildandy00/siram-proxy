@@ -26,7 +26,8 @@
 const express = require('express');
 const crypto = require('crypto');
 
-const AGENT_ONLINE_MS = 25 * 1000;          // agente considerato collegato
+const AGENT_ONLINE_MS = 40 * 1000;          // agente considerato collegato
+                                            // (manda un ping ogni 10 s anche mentre lavora)
 const QUEUE_EXPIRE_MS = 30 * 60 * 1000;     // lavoro mai preso → scaduto
 const CONFIRM_EXPIRE_MS = 12 * 60 * 1000;   // l'agente rinuncia già a 10 min
 const STALE_JOB_MS = 20 * 60 * 1000;        // lavoro in corso senza notizie
@@ -301,6 +302,15 @@ module.exports = function mountOrariCoster(app) {
     if (!safeEqual(token, AGENT_TOKEN)) return res.status(401).json({ error: 'Token agente non valido.' });
     state.agent.lastSeen = Date.now();
     next();
+  });
+
+  // Segnale di vita: durante un lavoro lungo l'agente non chiede lavoro,
+  // ma continua a farsi sentire così la pagina non lo dà per scollegato.
+  agent.post('/ping', (req, res) => {
+    const body = req.body || {};
+    if (body.version) state.agent.version = String(body.version).slice(0, 20);
+    if (body.host) state.agent.host = String(body.host).slice(0, 60);
+    res.json({ ok: true });
   });
 
   agent.post('/poll', (req, res) => {
@@ -706,4 +716,17 @@ module.exports = function mountOrariCoster(app) {
 
   app.use('/orari', router);
   console.log(`[orari] modulo Orari Coster ${enabled ? 'attivo' : 'DISATTIVATO'} su /orari`);
+
+  // Modulo "Analisi impianti": se il file analisi-coster.js è nella stessa
+  // cartella si aggancia da solo, così in server.js basta questa unica riga.
+  // Se non c'è, non succede niente e gli orari continuano a funzionare.
+  try {
+    require('./analisi-coster')(app);
+  } catch (err) {
+    if (err && err.code === 'MODULE_NOT_FOUND' && /analisi-coster/.test(String(err.message))) {
+      console.log('[analisi] analisi-coster.js non presente: modulo non caricato.');
+    } else {
+      console.error('[analisi] aggancio non riuscito:', err && err.message);
+    }
+  }
 };
