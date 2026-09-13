@@ -4,7 +4,7 @@
  * Fa da ponte tra la pagina del gestionale e l'agente Python sul PC:
  *
  *   browser ──(PIN)──▶ /orari/*            coda lavori, catalogo, conferme
- *   agente  ──(token)─▶ /orari/agent/*     prende i lavori, invia stato ed esito
+ *   agente  ──(token)─▶ /orari/agent/*     prende i lavori, inia stato ed esito
  *
  * Il server NON parla mai con Coster e NON conosce credenziali, conn_ref o
  * registri: conserva solo gli ID degli schedule e lo stato dei lavori.
