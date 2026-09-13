@@ -21,7 +21,7 @@
  *   ORARI_PIN             PIN della pagina; ANALISI_PIN se se ne vuole uno diverso
  *   ORARI_ALLOWED_ORIGIN  opzionale, origini ammesse
  *
- * Aggancio in server.js, accanto all'altro modulo:
+ * Aggancio in server.js, accanto all'altro modulo: n
  *   require('./analisi-coster')(app);
  */
 
