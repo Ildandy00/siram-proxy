@@ -1,719 +1,1436 @@
-/**
- * orari-coster.js — Modulo "Orari Coster" per il proxy Render.
- *
- * Fa da ponte tra la pagina del gestionale e l'agente Python sul PC:
- *
- *   browser ──(PIN)──▶ /orari/*            coda lavori, catalogo, conferme
- *   agente  ──(token)─▶ /orari/agent/*     prende i lavori, invia stato ed esito
- *
- * Il server NON parla mai con Coster e NON conosce credenziali, conn_ref o
- * registri: conserva solo gli ID degli schedule e lo stato dei lavori.
- * Tutto è in memoria: se Render si riavvia la coda si svuota e l'agente
- * reinvia l'anagrafica al primo contatto.
- *
- * Variabili d'ambiente su Render:
- *   ORARI_AGENT_TOKEN     segreto condiviso con l'agente (stringa lunga casuale)
- *   ORARI_PIN             codice richiesto dalla pagina web (meglio 8+ caratteri)
- *   ORARI_ALLOWED_ORIGIN  opzionale, es. https://siram-manutenzione.davide-cori93.workers.dev
- *                         (più origini separate da virgola; default: tutte)
- *
- * Aggancio in server.js (una riga, dopo la creazione di `app`):
- *   require('./orari-coster')(app);
- */
+const express    = require('express');
+const cors       = require('cors');
+const { google } = require('googleapis');
 
-'use strict';
+const app  = express();
+const PORT = process.env.PORT || 3000;
+require('./orari-coster')(app);
+  
+const SHEET_ID = process.env.SHEET_ID || '1JsQz8FiUMFGjFQ5tuodgjexxe1hE8UE87ORFDi_geWE';
 
-const express = require('express');
-const crypto = require('crypto');
+const SH = {
+  IMPIANTI:    'Impianti',
+  CATALOGO:    'CatalogoAttivita',
+  INTERVENTI:  'Interventi',
+  CHECKLIST:   'ChecklistEsecuzione',
+  ASSENZE:     'Assenze',
+  PUSHTOKENS:  'PushTokens',
+  PRATICHE:    'Pratiche',
+  OFFERTE:     'Offerte',
+  RDACAT:      'RdaCat',
+  REPERIBILITA:'Reperibilita',
+  PRESENZE:    'Presenze',
+  ASSEGNAZIONE:'Assegnazione',
+  CONTATORI:   'Contatori',
+  LETTURE:     'Letture',
+  CONFIG:      'Config',
+};
 
-const AGENT_ONLINE_MS = 40 * 1000;          // agente considerato collegato
-                                            // (manda un ping ogni 10 s anche mentre lavora)
-const QUEUE_EXPIRE_MS = 30 * 60 * 1000;     // lavoro mai preso → scaduto
-const CONFIRM_EXPIRE_MS = 12 * 60 * 1000;   // l'agente rinuncia già a 10 min
-const STALE_JOB_MS = 20 * 60 * 1000;        // lavoro in corso senza notizie
-const KEEP_FINAL_JOBS = 100;
-const KEEP_FINAL_MS = 7 * 24 * 3600 * 1000;
-const MAX_ACTIVE_JOBS = 10;
+const webpush = require('web-push');
+if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(
+    process.env.VAPID_EMAIL || 'mailto:admin@siram.it',
+    process.env.VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY
+  );
+}
+const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY || '';
 
-const PIN_MAX_FAILURES = 8;
-const PIN_WINDOW_MS = 15 * 60 * 1000;
-
-// Righe per famiglia di programma orario: "passi" = 8, "termostato" = 15.
-// Il numero vero arriva dall'anagrafica insieme allo schedule.
-const MAX_ROWS = 8;
-const MAX_ROWS_ANY = 15;
-// Unico controllo sulla temperatura: valore scrivibile nel registro Coster.
-// Nessun limite per tipo di schedule.
-const HARD_T_MIN = -25;
-const HARD_T_MAX = 100;
-
-const FINAL_STATES = new Set([
-  'completato', 'nessuna_modifica', 'annullato', 'errore', 'scaduto',
-]);
-const AGENT_STATES = new Set([
-  'connessione', 'lettura', 'attesa_conferma', 'scrittura', 'verifica',
-  'rollback', 'completato', 'nessuna_modifica', 'annullato', 'errore',
-]);
-const CANCELLABLE_STATES = new Set([
-  'in_coda', 'preso', 'connessione', 'lettura', 'attesa_conferma',
-]);
-
-// ------------------------------------------------------------
-// Utility
-// ------------------------------------------------------------
-
-function safeEqual(a, b) {
-  const ha = crypto.createHash('sha256').update(String(a || '')).digest();
-  const hb = crypto.createHash('sha256').update(String(b || '')).digest();
-  return crypto.timingSafeEqual(ha, hb);
+// ── OneSignal per notifiche push native ──
+const ONESIGNAL_APP_ID  = process.env.ONESIGNAL_APP_ID  || '';
+const ONESIGNAL_API_KEY = process.env.ONESIGNAL_API_KEY || '';
+const oneSignalPronto = !!(ONESIGNAL_APP_ID && ONESIGNAL_API_KEY);
+if (oneSignalPronto) {
+  console.log('OneSignal configurato (push attivo)');
+} else {
+  console.warn('OneSignal non configurato — variabili ONESIGNAL_APP_ID/ONESIGNAL_API_KEY mancanti');
 }
 
-function clientIp(req) {
-  const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-  return fwd || req.socket.remoteAddress || '?';
-}
+// ── Invio notifica push via OneSignal usando external_id (nome operaio) ──
+// operai: array di nomi operaio (es. ['Matteo'])
+async function pushNotifica(sheets, operai, titolo, corpo) {
+  if (!oneSignalPronto) { console.warn('pushNotifica: OneSignal non configurato'); return; }
 
-function newId() {
-  return crypto.randomBytes(8).toString('hex');
-}
-
-function isIntIn(v, lo, hi) {
-  return Number.isInteger(v) && v >= lo && v <= hi;
-}
-
-function optionalInt(v, lo, hi) {
-  if (v === null || v === undefined || v === '') return { ok: true, value: null };
-  const n = Number(v);
-  if (!isIntIn(n, lo, hi)) return { ok: false };
-  return { ok: true, value: n };
-}
-
-/** Stesse regole dell'agente (che comunque rivalida tutto). */
-function validateChanges(raw, righe = MAX_ROWS, tMin = HARD_T_MIN, tMax = HARD_T_MAX) {
-  const nRighe = Number.isInteger(righe) && righe > 0 && righe <= MAX_ROWS_ANY ? righe : MAX_ROWS;
-  if (!Array.isArray(raw) || raw.length === 0) throw new Error('Nessuna modifica impostata.');
-  if (raw.length > nRighe) throw new Error('Troppe righe.');
-
-  const seen = new Set();
-  return raw.map((item) => {
-    if (!item || typeof item !== 'object') throw new Error('Formato modifiche non valido.');
-    const row = Number(item.row);
-    if (!isIntIn(row, 0, nRighe - 1)) throw new Error('Riga non valida.');
-    if (seen.has(row)) throw new Error(`Riga ${row + 1} ripetuta.`);
-    seen.add(row);
-
-    if (item.action === 'disable') return { row, action: 'disable' };
-    if (item.action !== 'modify') throw new Error(`Riga ${row + 1}: azione non valida.`);
-
-    const days = optionalInt(item.days, 1, 127);
-    const start = optionalInt(item.start, 0, 1439);
-    const end = optionalInt(item.end, 0, 1439);
-    if (!days.ok) throw new Error(`Riga ${row + 1}: giorni non validi.`);
-    if (!start.ok) throw new Error(`Riga ${row + 1}: ora inizio non valida.`);
-    if (!end.ok) throw new Error(`Riga ${row + 1}: ora fine non valida.`);
-
-    let temp = null;
-    if (item.temp !== null && item.temp !== undefined && item.temp !== '') {
-      temp = Number(String(item.temp).replace(',', '.'));
-      if (!Number.isFinite(temp) || temp < tMin || temp > tMax) {
-        throw new Error(`Riga ${row + 1}: temperatura non scrivibile nel registro Coster (${tMin}…${tMax} °C).`);
-      }
-      temp = Math.round(temp * 10) / 10;
-    }
-
-    if (start.value !== null && end.value !== null && end.value <= start.value) {
-      throw new Error(`Riga ${row + 1}: l'ora finale deve essere successiva a quella iniziale.`);
-    }
-    if (days.value === null && start.value === null && end.value === null && temp === null) {
-      throw new Error(`Riga ${row + 1}: 'Modifica' senza alcun valore.`);
-    }
-
-    return { row, action: 'modify', days: days.value, start: start.value, end: end.value, temp };
-  });
-}
-
-// ------------------------------------------------------------
-// Modulo
-// ------------------------------------------------------------
-
-module.exports = function mountOrariCoster(app) {
-  const AGENT_TOKEN = process.env.ORARI_AGENT_TOKEN || '';
-  const PIN = process.env.ORARI_PIN || '';
-  const ALLOWED = (process.env.ORARI_ALLOWED_ORIGIN || '*')
-    .split(',').map((s) => s.trim()).filter(Boolean);
-
-  const enabled = Boolean(AGENT_TOKEN && PIN);
-  if (!enabled) {
-    console.warn('[orari] ORARI_AGENT_TOKEN o ORARI_PIN non impostati: modulo disattivato.');
+  // Scarta destinatari vuoti/nulli (es. interventi nel Contenitore senza operaio):
+  // inviare a external_id vuoto fa rifiutare la richiesta da OneSignal
+  // ("alias_id's must be an array of non empty strings").
+  const destinatari = (Array.isArray(operai) ? operai : [operai])
+    .filter(o => o && o.toString().trim() !== '' && o.toString().trim() !== 'DaAssegnare');
+  if (destinatari.length === 0) {
+    console.log('pushNotifica: nessun destinatario valido, invio saltato');
+    return;
   }
 
-  const state = {
-    agent: { lastSeen: 0, version: null, host: null },
-    catalog: null,
-    catalogHash: null,
-    catalogTime: null,
-    jobs: new Map(),        // id → job
-    pinFailures: new Map(), // ip → { count, first }
-    // Straordinari: la verità sta sul PC (SQLite locale dell'agente).
-    // Qui: ultima fotografia inviata dall'agente + richieste non ancora confermate.
-    straordinari: [],
-    straordinariHash: null,
-    straordinariTime: null,
-    straOps: new Map(),     // op_id → { op_id, tipo:'crea'|'annulla', ... , creato }
-    // Righe viste davvero su Coster nell'ultima lettura (schedule_id → n).
-    // Alcune centraline espongono più righe di quelle previste dalla famiglia.
-    righeViste: new Map(),
-  };
-
-  // ----------------------------------------------------------
-  // Helpers sui lavori
-  // ----------------------------------------------------------
-
-  function setState(job, stato, messaggio) {
-    const now = Date.now();
-    if (job.stato !== stato) {
-      job.storia.push({ t: now, stato, messaggio: messaggio || '' });
-      if (job.storia.length > 60) job.storia.splice(1, job.storia.length - 60);
-    }
-    job.stato = stato;
-    if (messaggio !== undefined) job.messaggio = messaggio;
-    job.aggiornato = now;
-    if (FINAL_STATES.has(stato) && !job.concluso) job.concluso = now;
-  }
-
-  function jobPublic(job, full = true) {
-    const out = {
-      id: job.id,
-      tipo: job.tipo,
-      schedule_id: job.schedule_id,
-      etichetta: job.etichetta,
-      stato: job.stato,
-      messaggio: job.messaggio,
-      creato: job.creato,
-      aggiornato: job.aggiornato,
-      concluso: job.concluso || null,
-      annulla_richiesto: job.annulla_richiesto,
-      finale: FINAL_STATES.has(job.stato),
-    };
-    if (full) {
-      out.modifiche = job.modifiche;
-      out.dati = job.dati;
-      out.storia = job.storia;
-    }
-    return out;
-  }
-
-  /** L'agente riporta quante righe ha davvero letto: si tiene da conto. */
-  function ricordaRighe(job, dati) {
-    const n = Number(dati && dati.righe);
-    if (!job || !Number.isInteger(n) || n < 1 || n > MAX_ROWS_ANY) return;
-    state.righeViste.set(String(job.schedule_id), n);
-  }
-
-  function findSchedule(scheduleId) {
-    const cat = state.catalog;
-    if (!cat) return null;
-    return cat.schedules.find((s) => String(s.id) === String(scheduleId)) || null;
-  }
-
-  function righeDi(scheduleId) {
-    const sch = findSchedule(scheduleId);
-    const n = Number(sch && sch.righe);
-    const base = Number.isInteger(n) && n > 0 && n <= MAX_ROWS_ANY ? n : MAX_ROWS;
-    const viste = Number(state.righeViste.get(String(scheduleId)));
-    return Number.isInteger(viste) && viste > base ? Math.min(viste, MAX_ROWS_ANY) : base;
-  }
-
-  function labelFor(scheduleId) {
-    const cat = state.catalog;
-    if (!cat) return null;
-    const sch = findSchedule(scheduleId);
-    if (!sch) return null;
-    const imp = cat.impianti.find((i) => i.ref === sch.impianto_ref) || {};
-    const com = cat.commesse.find((c) => c.ref === imp.commessa_ref) || {};
-    return {
-      commessa: com.nome || '',
-      impianto: [imp.codice_k, imp.nome].filter(Boolean).join(' - '),
-      schedule: `${sch.nome} [${sch.scheduler_id}]`,
-    };
-  }
-
-  function sweep() {
-    const now = Date.now();
-    for (const job of state.jobs.values()) {
-      if (FINAL_STATES.has(job.stato)) continue;
-
-      if (job.stato === 'in_coda' && now - job.creato > QUEUE_EXPIRE_MS) {
-        setState(job, 'scaduto', 'Agente non disponibile entro 30 minuti: richiesta non eseguita.');
-      } else if (job.stato === 'attesa_conferma' && now - job.aggiornato > CONFIRM_EXPIRE_MS) {
-        setState(job, 'annullato', 'Conferma non arrivata in tempo: nessuna modifica eseguita.');
-      } else if (job.stato !== 'in_coda' && job.stato !== 'attesa_conferma'
-                 && job.stato !== 'confermato' && now - job.aggiornato > STALE_JOB_MS) {
-        setState(job, 'errore', 'Nessuna notizia dall\'agente da 20 minuti. Verificare su Coster.');
-      }
-    }
-
-    const finals = [...state.jobs.values()]
-      .filter((j) => FINAL_STATES.has(j.stato))
-      .sort((a, b) => b.aggiornato - a.aggiornato);
-    finals.forEach((job, idx) => {
-      if (idx >= KEEP_FINAL_JOBS || now - job.aggiornato > KEEP_FINAL_MS) state.jobs.delete(job.id);
+  try {
+    const resp = await fetch('https://onesignal.com/api/v1/notifications', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Authorization': 'Basic ' + ONESIGNAL_API_KEY
+      },
+      body: JSON.stringify({
+        app_id: ONESIGNAL_APP_ID,
+        include_aliases: { external_id: destinatari },
+        target_channel: 'push',
+        headings: { en: titolo, it: titolo },
+        contents: { en: corpo, it: corpo }
+      })
     });
-
-    for (const [ip, f] of state.pinFailures) {
-      if (now - f.first > PIN_WINDOW_MS) state.pinFailures.delete(ip);
-    }
-  }
-
-  const timer = setInterval(sweep, 30 * 1000);
-  if (timer.unref) timer.unref();
-
-  // ----------------------------------------------------------
-  // Router
-  // ----------------------------------------------------------
-
-  const router = express.Router();
-  router.use(express.json({ limit: '5mb' }));
-
-  // CORS (compatibile anche con un cors() globale già presente)
-  router.use((req, res, next) => {
-    const origin = req.headers.origin;
-    if (ALLOWED.includes('*')) {
-      res.setHeader('Access-Control-Allow-Origin', '*');
-    } else if (origin && ALLOWED.includes(origin)) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Vary', 'Origin');
-    }
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Orari-Pin, Authorization');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Cache-Control', 'no-store');
-    if (req.method === 'OPTIONS') return res.sendStatus(204);
-    if (!enabled) return res.status(503).json({ error: 'Modulo orari non configurato sul server.' });
-    next();
-  });
-
-  // ---------------- AGENTE ----------------
-
-  const agent = express.Router();
-
-  agent.use((req, res, next) => {
-    const auth = String(req.headers.authorization || '');
-    const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
-    if (!safeEqual(token, AGENT_TOKEN)) return res.status(401).json({ error: 'Token agente non valido.' });
-    state.agent.lastSeen = Date.now();
-    next();
-  });
-
-  // Segnale di vita: durante un lavoro lungo l'agente non chiede lavoro,
-  // ma continua a farsi sentire così la pagina non lo dà per scollegato.
-  agent.post('/ping', (req, res) => {
-    const body = req.body || {};
-    if (body.version) state.agent.version = String(body.version).slice(0, 20);
-    if (body.host) state.agent.host = String(body.host).slice(0, 60);
-    res.json({ ok: true });
-  });
-
-  agent.post('/poll', (req, res) => {
-    const body = req.body || {};
-    state.agent.version = String(body.version || '').slice(0, 20);
-    state.agent.host = String(body.host || '').slice(0, 60);
-
-    // L'agente lavora un lavoro alla volta: se sta chiedendo lavoro,
-    // quelli che risultano "in corso" sono rimasti orfani (agente riavviato).
-    for (const job of state.jobs.values()) {
-      if (!FINAL_STATES.has(job.stato) && !['in_coda', 'confermato', 'attesa_conferma'].includes(job.stato)) {
-        const warn = ['scrittura', 'verifica', 'rollback'].includes(job.stato)
-          ? ' La scrittura era in corso: CONTROLLARE IL PROGRAMMA SU COSTER.'
-          : '';
-        setState(job, 'errore', `Agente riavviato durante il lavoro.${warn}`);
-      }
-      if (['confermato', 'attesa_conferma'].includes(job.stato)) {
-        setState(job, 'annullato', 'Agente riavviato prima della scrittura: nessuna modifica eseguita.');
-      }
-    }
-
-    const needCatalog = !state.catalogHash || body.catalog_hash !== state.catalogHash;
-
-    // Straordinari: conferme, fotografia, richieste pendenti
-    for (const opId of Array.isArray(body.ack_ops) ? body.ack_ops : []) {
-      state.straOps.delete(String(opId));
-    }
-    if (Array.isArray(body.straordinari)) {
-      state.straordinari = body.straordinari.slice(0, 500);
-      state.straordinariHash = String(body.straordinari_hash || '');
-      state.straordinariTime = Date.now();
-    }
-    const needStra = !state.straordinariHash || body.straordinari_hash !== state.straordinariHash;
-    const straOps = [...state.straOps.values()].sort((a, b) => a.creato - b.creato).slice(0, 20);
-
-    const next = [...state.jobs.values()]
-      .filter((j) => j.stato === 'in_coda')
-      .sort((a, b) => a.creato - b.creato)[0];
-
-    let job = null;
-    if (next && !needCatalog && !straOps.length) {   // prima si registrano gli straordinari
-      setState(next, 'preso', 'Presa in carico dall\'agente.');
-      job = {
-        id: next.id,
-        tipo: next.tipo,
-        schedule_id: next.schedule_id,
-        modifiche: next.modifiche,
-      };
-    }
-
-    res.json({
-      need_catalog: needCatalog,
-      job,
-      need_straordinari: needStra,
-      straordinari_ops: straOps,
-    });
-  });
-
-  agent.post('/catalog', (req, res) => {
-    const { catalog, hash } = req.body || {};
-    if (!catalog || !Array.isArray(catalog.commesse) || !Array.isArray(catalog.impianti)
-        || !Array.isArray(catalog.schedules)) {
-      return res.status(400).json({ error: 'Catalogo non valido.' });
-    }
-    state.catalog = catalog;
-    state.catalogHash = String(hash || '');
-    state.catalogTime = Date.now();
-    res.json({ ok: true });
-  });
-
-  agent.get('/jobs/:id', (req, res) => {
-    const job = state.jobs.get(req.params.id);
-    if (!job) return res.json({ stato: 'annullato', annulla_richiesto: true, mancante: true });
-    res.json({ stato: job.stato, annulla_richiesto: job.annulla_richiesto });
-  });
-
-  agent.post('/jobs/:id', (req, res) => {
-    const job = state.jobs.get(req.params.id);
-    const { stato, messaggio, dati } = req.body || {};
-
-    if (!AGENT_STATES.has(stato)) return res.status(400).json({ error: 'Stato non valido.' });
-
-    if (!job) {
-      // Server riavviato: se l'agente comunica un esito finale non c'è nulla da fare;
-      // se è a metà (prima della scrittura) deve fermarsi.
-      if (stato === 'scrittura') return res.status(409).json({ error: 'Lavoro sconosciuto.' });
-      return res.json({ stato: 'annullato', annulla_richiesto: true, mancante: true });
-    }
-
-    const msg = String(messaggio || '').slice(0, 4000);
-    ricordaRighe(job, dati);
-
-    if (FINAL_STATES.has(stato)) {
-      setState(job, stato, msg);
-      if (dati !== undefined) job.dati = dati;
-      return res.json({ stato: job.stato, annulla_richiesto: job.annulla_richiesto });
-    }
-
-    if (FINAL_STATES.has(job.stato)) {
-      // Lavoro già chiuso lato server (scaduto/annullato): l'agente deve fermarsi
-      return res.json({ stato: job.stato, annulla_richiesto: true });
-    }
-
-    if (stato === 'scrittura' && !['confermato', 'scrittura'].includes(job.stato)) {
-      return res.status(409).json({ error: 'Scrittura non confermata dal sito.' });
-    }
-    if (['verifica', 'rollback'].includes(stato)
-        && !['scrittura', 'verifica', 'rollback'].includes(job.stato)) {
-      return res.status(409).json({ error: 'Transizione non valida.' });
-    }
-
-    setState(job, stato, msg);
-    if (dati !== undefined) job.dati = dati;
-    res.json({ stato: job.stato, annulla_richiesto: job.annulla_richiesto });
-  });
-
-  router.use('/agent', agent);
-
-  // ---------------- PAGINA WEB ----------------
-
-  const web = express.Router();
-
-  web.use((req, res, next) => {
-    const ip = clientIp(req);
-    const now = Date.now();
-    const f = state.pinFailures.get(ip);
-    if (f && f.count >= PIN_MAX_FAILURES && now - f.first < PIN_WINDOW_MS) {
-      return res.status(429).json({ error: 'Troppi tentativi con PIN errato. Riprova tra 15 minuti.' });
-    }
-    if (!safeEqual(req.headers['x-orari-pin'], PIN)) {
-      if (!f || now - f.first > PIN_WINDOW_MS) state.pinFailures.set(ip, { count: 1, first: now });
-      else f.count += 1;
-      return res.status(401).json({ error: 'PIN non valido.' });
-    }
-    state.pinFailures.delete(ip);
-    req.orariIp = ip;
-    next();
-  });
-
-  web.get('/stato', (req, res) => {
-    const now = Date.now();
-    const active = [...state.jobs.values()].filter((j) => !FINAL_STATES.has(j.stato));
-    res.json({
-      agente_online: now - state.agent.lastSeen < AGENT_ONLINE_MS,
-      ultimo_contatto: state.agent.lastSeen || null,
-      versione_agente: state.agent.version,
-      host_agente: state.agent.host,
-      catalogo_pronto: Boolean(state.catalog),
-      catalogo_aggiornato: state.catalogTime,
-      lavori_attivi: active.length,
-      ora_server: now,
-    });
-  });
-
-  web.get('/catalogo', (req, res) => {
-    if (!state.catalog) {
-      return res.status(503).json({ error: 'Anagrafica non ancora ricevuta dall\'agente.' });
-    }
-    res.json({ catalogo: state.catalog, aggiornato: state.catalogTime });
-  });
-
-  web.get('/jobs', (req, res) => {
-    const list = [...state.jobs.values()]
-      .sort((a, b) => b.creato - a.creato)
-      .slice(0, 30)
-      .map((j) => jobPublic(j, false));
-    res.json({ lavori: list });
-  });
-
-  web.get('/jobs/:id', (req, res) => {
-    const job = state.jobs.get(req.params.id);
-    if (!job) return res.status(404).json({ error: 'Lavoro non trovato (il server potrebbe essersi riavviato).' });
-    res.json(jobPublic(job));
-  });
-
-  web.post('/jobs', (req, res) => {
-    const { tipo, schedule_id: scheduleId, modifiche } = req.body || {};
-
-    if (!['lettura', 'modifica'].includes(tipo)) return res.status(400).json({ error: 'Tipo non valido.' });
-    if (!state.catalog) return res.status(503).json({ error: 'Anagrafica non ancora disponibile.' });
-
-    const etichetta = labelFor(scheduleId);
-    if (!etichetta) return res.status(400).json({ error: 'Schedule non presente in anagrafica.' });
-
-    const active = [...state.jobs.values()].filter((j) => !FINAL_STATES.has(j.stato));
-    if (active.length >= MAX_ACTIVE_JOBS) {
-      return res.status(429).json({ error: 'Troppi lavori in coda. Attendi che finiscano.' });
-    }
-    if (tipo === 'modifica' && active.some((j) => String(j.schedule_id) === String(scheduleId) && j.tipo === 'modifica')) {
-      return res.status(409).json({ error: 'C\'è già una modifica in corso su questo schedule.' });
-    }
-
-    let changes = null;
-    if (tipo === 'modifica') {
-      try {
-        changes = validateChanges(modifiche, righeDi(scheduleId));
-      } catch (err) {
-        return res.status(400).json({ error: err.message });
-      }
-    }
-
-    const now = Date.now();
-    const job = {
-      id: newId(),
-      tipo,
-      schedule_id: scheduleId,
-      etichetta,
-      modifiche: changes,
-      stato: 'in_coda',
-      messaggio: now - state.agent.lastSeen < AGENT_ONLINE_MS
-        ? 'In coda: l\'agente la prende a breve.'
-        : 'In coda: l\'agente sul PC al momento non è collegato.',
-      dati: null,
-      creato: now,
-      aggiornato: now,
-      concluso: null,
-      annulla_richiesto: false,
-      richiesto_da: req.orariIp,
-      storia: [{ t: now, stato: 'in_coda', messaggio: '' }],
-    };
-    state.jobs.set(job.id, job);
-    console.log(`[orari] nuovo lavoro ${job.id} ${tipo} ${etichetta.impianto} / ${etichetta.schedule}`);
-    res.status(201).json(jobPublic(job));
-  });
-
-  web.post('/jobs/:id/conferma', (req, res) => {
-    const job = state.jobs.get(req.params.id);
-    if (!job) return res.status(404).json({ error: 'Lavoro non trovato.' });
-    if (job.stato !== 'attesa_conferma' || job.annulla_richiesto) {
-      return res.status(409).json({ error: `Il lavoro non è in attesa di conferma (stato: ${job.stato}).` });
-    }
-    job.confermato_da = req.orariIp;
-    setState(job, 'confermato', 'Confermato: l\'agente procede con la scrittura.');
-    console.log(`[orari] lavoro ${job.id} confermato da ${req.orariIp}`);
-    res.json(jobPublic(job));
-  });
-
-  web.post('/jobs/:id/annulla', (req, res) => {
-    const job = state.jobs.get(req.params.id);
-    if (!job) return res.status(404).json({ error: 'Lavoro non trovato.' });
-    if (!CANCELLABLE_STATES.has(job.stato)) {
-      return res.status(409).json({ error: `Non annullabile nello stato "${job.stato}".` });
-    }
-    if (job.stato === 'in_coda' || job.stato === 'attesa_conferma') {
-      setState(job, 'annullato', 'Annullato dal sito: nessuna modifica eseguita.');
+    const data = await resp.json().catch(() => ({}));
+    if (data.errors) {
+      console.warn('OneSignal errori:', JSON.stringify(data.errors));
     } else {
-      job.annulla_richiesto = true;
-      job.messaggio = 'Annullamento richiesto…';
-      job.aggiornato = Date.now();
+      console.log('OneSignal inviata a', destinatari.join(','), '— id:', data.id || '?');
     }
-    res.json(jobPublic(job));
-  });
-
-
-  // ---------------- STRAORDINARI ----------------
-  // Il PC è l'unico che li scrive e ripristina: qui si inoltrano le richieste
-  // (finché l'agente non le conferma) e si mostra la sua fotografia.
-
-  const STRA_MAX_FASCE = 4;
-  const STRA_MAX_RANGE_DAYS = 7;
-  const STRA_MAX_DAYS_AHEAD = 90;
-  const STRA_ACTIVE = new Set(['programmato', 'applicato']);
-
-  const hhmm = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
-  const fasceText = (f) => f.map((x) => `${hhmm(x.start)}-${hhmm(x.end)} ${Number(x.temp).toFixed(1)}°C`).join(', ');
-
-  function parseIsoDate(v) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(v || ''))) return null;
-    const d = new Date(`${v}T12:00:00Z`);
-    return Number.isNaN(d.getTime()) ? null : d;
+  } catch (e) {
+    console.warn('pushNotifica (OneSignal) error:', e.message);
   }
-  const isoOf = (d) => d.toISOString().slice(0, 10);
+}
 
-  function validateFasce(raw) {
-    if (!Array.isArray(raw) || !raw.length) throw new Error('Inserisci almeno una fascia oraria.');
-    if (raw.length > STRA_MAX_FASCE) throw new Error(`Al massimo ${STRA_MAX_FASCE} fasce.`);
-    const out = raw.map((f, n) => {
-      const start = optionalInt(f && f.start, 0, 1439);
-      const end = optionalInt(f && f.end, 0, 1439);
-      if (!start.ok || !end.ok || start.value === null || end.value === null) throw new Error(`Fascia ${n + 1}: orari non validi.`);
-      if (end.value <= start.value) throw new Error(`Fascia ${n + 1}: l'ora finale deve essere successiva a quella iniziale.`);
-      const temp = Number(String(f.temp).replace(',', '.'));
-      if (!Number.isFinite(temp) || temp < HARD_T_MIN || temp > HARD_T_MAX) {
-        throw new Error(`Fascia ${n + 1}: temperatura non scrivibile (${HARD_T_MIN}…${HARD_T_MAX} °C).`);
-      }
-      return { start: start.value, end: end.value, temp: Math.round(temp * 10) / 10 };
-    }).sort((a, b) => a.start - b.start);
-    for (let i = 1; i < out.length; i++) {
-      if (out[i].start < out[i - 1].end) throw new Error('Le fasce si sovrappongono.');
+function getAuth() {
+  const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+  return new google.auth.GoogleAuth({ credentials: creds, scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
+}
+async function getSheets() { const auth = getAuth(); return google.sheets({ version: 'v4', auth }); }
+
+app.use(cors());
+app.use(express.json());
+app.get('/', (req, res) => res.json({ ok: true, service: 'Siram Proxy' }));
+
+async function leggi(sheets, foglio) {
+  const r = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: foglio });
+  return r.data.values || [];
+}
+
+function fmtData(val) {
+  if (!val) return '';
+  try { const d = new Date(val); if (isNaN(d.getTime())) return ''; return d.toISOString().slice(0,10); } catch(e) { return ''; }
+}
+function fmtDateTime(val) {
+  if (!val) return '';
+  try { const d = new Date(val); if (isNaN(d.getTime())) return ''; return d.toLocaleString('it-IT', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }); } catch(e) { return ''; }
+}
+
+app.get('/vapid-public', (req, res) => res.json({ key: VAPID_PUBLIC }));
+
+app.post('/registra-push', async (req, res) => {
+  try {
+    const { operaio, subscription, fcmToken } = req.body;
+    if (!operaio || (!subscription && !fcmToken)) return res.json({ ok: false });
+
+    const dato = fcmToken ? fcmToken : JSON.stringify(subscription);
+    const tipo = fcmToken ? 'fcm' : 'web';
+
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.PUSHTOKENS).catch(() => []);
+    const idx = rows.findIndex((r,i) => i > 0 && r[0] === operaio);
+    if (idx > 0) {
+      await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.PUSHTOKENS}!A${idx+1}:C${idx+1}`, valueInputOption: 'RAW', requestBody: { values: [[operaio, dato, tipo]] } });
+    } else {
+      await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: SH.PUSHTOKENS, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [[operaio, dato, tipo]] } });
     }
-    return out;
-  }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
 
-  web.get('/straordinari', (req, res) => {
-    const ops = [...state.straOps.values()];
-    const cancelling = new Set(ops.filter((o) => o.tipo === 'annulla').map((o) => o.id));
-    const pending = ops.filter((o) => o.tipo === 'crea').map((o) => ({
-      id: o.id,
-      schedule_id: o.schedule_id,
-      data: o.data,
-      giorno: o.giorno,
-      fasce: o.fasce,
-      fasce_testo: fasceText(o.fasce),
-      note: o.note,
-      etichetta: o.etichetta,
-      stato: 'in_attesa_agente',
-      messaggio: 'In attesa che il PC lo registri.',
-      creato: o.creato,
-    }));
-    const lista = state.straordinari.map((x) => (cancelling.has(x.id) ? { ...x, annulla_in_invio: true } : x));
-    res.json({
-      lista: [...pending, ...lista],
-      aggiornato: state.straordinariTime,
-      agente_online: Date.now() - state.agent.lastSeen < AGENT_ONLINE_MS,
-    });
-  });
-
-  web.post('/straordinari', (req, res) => {
-    const { schedule_id: scheduleId, data_dal: dal, data_al: al, fasce, note } = req.body || {};
-    if (!state.catalog) return res.status(503).json({ error: 'Anagrafica non ancora disponibile.' });
-    const etichetta = labelFor(scheduleId);
-    if (!etichetta) return res.status(400).json({ error: 'Schedule non presente in anagrafica.' });
-
-    const d1 = parseIsoDate(dal);
-    const d2 = al ? parseIsoDate(al) : d1;
-    if (!d1 || !d2) return res.status(400).json({ error: 'Date non valide.' });
-    if (d2 < d1) return res.status(400).json({ error: 'La data finale è prima di quella iniziale.' });
-    const giorni = Math.round((d2 - d1) / 86400000) + 1;
-    if (giorni > STRA_MAX_RANGE_DAYS) {
-      return res.status(400).json({ error: `Al massimo ${STRA_MAX_RANGE_DAYS} giorni per richiesta.` });
-    }
-    let oggiIso;
-    try { oggiIso = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Rome' }); } catch (e) { oggiIso = ''; }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(oggiIso)) oggiIso = new Date().toISOString().slice(0, 10);
-    const oggi = parseIsoDate(oggiIso);
-    if (d1 < oggi) return res.status(400).json({ error: 'La data è già passata.' });
-    if (d2 > new Date(oggi.getTime() + STRA_MAX_DAYS_AHEAD * 86400000)) {
-      return res.status(400).json({ error: `Date oltre ${STRA_MAX_DAYS_AHEAD} giorni.` });
-    }
-
-    let clean;
-    try { clean = validateFasce(fasce); } catch (err) { return res.status(400).json({ error: err.message }); }
-
-    const dates = [];
-    for (let i = 0; i < giorni; i++) dates.push(isoOf(new Date(d1.getTime() + i * 86400000)));
-
-    const busy = new Set([
-      ...state.straordinari.filter((x) => String(x.schedule_id) === String(scheduleId) && STRA_ACTIVE.has(x.stato)).map((x) => x.data),
-      ...[...state.straOps.values()].filter((o) => o.tipo === 'crea' && String(o.schedule_id) === String(scheduleId)).map((o) => o.data),
+app.get('/dati', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const [rImp, rCat, rInt, rChk] = await Promise.all([
+      leggi(sheets, SH.IMPIANTI), leggi(sheets, SH.CATALOGO),
+      leggi(sheets, SH.INTERVENTI), leggi(sheets, SH.CHECKLIST),
     ]);
-    const clash = dates.filter((d) => busy.has(d));
-    if (clash.length) {
-      return res.status(409).json({ error: `Esiste già uno straordinario su questo schedule il ${clash.join(', ')}.` });
+    const impianti   = rImp.slice(1).filter(r=>r[0]).map(r=>({ codice:r[0]||'', descrizione:r[1]||'', comune:r[2]||'', indirizzo:r[3]||'', operaioDefault:r[4]||'' }));
+    const catalogo   = rCat.slice(1).filter(r=>r[0]).map(r=>({ codiceImpianto:r[0]||'', tipoVisita:r[1]||'', attivita:r[2]||'', ordine:Number(r[3])||0, obbligatoria:r[4]||'SI' }));
+    const interventi = rInt.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', codiceImpianto:r[1]||'', dataPrevista:fmtData(r[2]), operaio:r[3]||'', tipoVisita:r[4]||'', stato:r[5]||'', note:r[6]||'', dataChiusura:fmtData(r[7]), creatoIl:fmtData(r[8]), secondoOperaio:r[9]||'', interventoCollegato:r[10]||'', linkDrive:r[11]||'', dataFine:fmtData(r[12]), operaioSecondario2:r[13]||'', notaChiusura:r[14]||'', noteResponsabile:r[15]||'' }));
+    const checklist  = rChk.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', idIntervento:r[1]||'', attivita:r[2]||'', eseguita:r[3]||'NO', oraCompletamento:fmtDateTime(r[4]), note:r[5]||'', extra:r[6]||'NO' }));
+    res.json({ impianti, catalogo, interventi, checklist });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// GET /impianti-operaio?operaio=Matteo
+// Restituisce i codici impianto assegnati all'operaio dal foglio Assegnazione
+app.get('/impianti-operaio', async (req, res) => {
+  try {
+    const { operaio } = req.query;
+    if (!operaio) return res.json({ codici: [] });
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.ASSEGNAZIONE || 'Assegnazione');
+    // Foglio Assegnazione: A=Codice, B=Descrizione, C=Comune, D=Operaio
+    const codici = rows.slice(1)
+      .filter(r => r[0] && r[3] && r[3].toString().trim() === operaio)
+      .map(r => r[0].toString().trim().toUpperCase());
+    res.json({ codici });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.post('/aggiorna-voce', async (req, res) => {
+  try {
+    const { id, eseguita, note } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.CHECKLIST);
+    const idx = rows.findIndex((r,i) => i > 0 && r[0] === id);
+    if (idx === -1) return res.json({ ok: false, errore: 'Voce non trovata' });
+    const rowNum = idx + 1;
+    if (eseguita !== undefined) {
+      await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.CHECKLIST}!D${rowNum}`, valueInputOption: 'RAW', requestBody: { values: [[eseguita]] } });
+      const ora = eseguita === 'SI' ? new Date().toLocaleString('it-IT', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }) : '';
+      await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.CHECKLIST}!E${rowNum}`, valueInputOption: 'RAW', requestBody: { values: [[ora]] } });
     }
+    if (note !== undefined) {
+      await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.CHECKLIST}!F${rowNum}`, valueInputOption: 'RAW', requestBody: { values: [[note]] } });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
 
-    const GG = ['domenica', 'lunedì', 'martedì', 'mercoledì', 'giovedì', 'venerdì', 'sabato'];
-    const now = Date.now();
-    const created = dates.map((d, i) => {
-      const op = {
-        op_id: `op${newId()}`,
-        tipo: 'crea',
-        id: `st${newId()}`,
-        schedule_id: Number.isFinite(Number(scheduleId)) ? Number(scheduleId) : scheduleId,
-        data: d,
-        giorno: GG[parseIsoDate(d).getUTCDay()],
-        fasce: clean,
-        note: String(note || '').slice(0, 300),
-        etichetta,
-        creato: now + i,
-        richiesto_da: req.orariIp,
-      };
-      state.straOps.set(op.op_id, op);
-      return op.id;
-    });
-    console.log(`[orari] straordinari richiesti ${dates.join(',')} ${etichetta.impianto} / ${etichetta.schedule}: ${fasceText(clean)}`);
-    res.status(201).json({ ok: true, ids: created });
-  });
+app.post('/aggiorna-intervento', async (req, res) => {
+  try {
+    const { id, stato, operaio } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.INTERVENTI);
+    const ora    = stato === 'Chiuso' ? new Date().toLocaleString('it-IT', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }) : '';
 
-  web.post('/straordinari/:id/annulla', (req, res) => {
-    const id = String(req.params.id);
-    for (const [opId, op] of state.straOps) {
-      if (op.tipo === 'crea' && op.id === id) {
-        state.straOps.delete(opId);
-        return res.json({ ok: true, messaggio: 'Annullato prima che il PC lo registrasse.' });
+    async function aggiornaRiga(rigaId) {
+      const i = rows.findIndex((r,idx) => idx > 0 && r[0] === rigaId);
+      if (i < 1) return;
+      await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!F${i+1}`, valueInputOption: 'RAW', requestBody: { values: [[stato]] } });
+      if (stato === 'Chiuso') {
+        await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!H${i+1}`, valueInputOption: 'RAW', requestBody: { values: [[ora]] } });
+      }
+      if (stato === 'Aperto') {
+        const notaAttuale = rows[i][6] || '';
+        const dataRiapertura = new Date().toLocaleString('it-IT', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' });
+        const notaAggiornata = notaAttuale ? notaAttuale + ` | 🔄 Riaperto il ${dataRiapertura}` : `🔄 Riaperto il ${dataRiapertura}`;
+        await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!G${i+1}:H${i+1}`, valueInputOption: 'RAW', requestBody: { values: [[notaAggiornata, '']] } });
       }
     }
-    const item = state.straordinari.find((x) => x.id === id);
-    if (!item) return res.status(404).json({ error: 'Straordinario non trovato.' });
-    if (!STRA_ACTIVE.has(item.stato) || item.annulla) {
-      return res.status(409).json({ error: `Non annullabile (stato: ${item.stato}).` });
+
+    const notaChiusura = req.body.notaChiusura;
+    if (stato === 'Chiuso' && notaChiusura) {
+      const rowNota = rows.findIndex((r,idx) => idx > 0 && r[0] === id);
+      if (rowNota > 0) {
+        // Nota di chiusura dell'operaio nella colonna dedicata O
+        await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!O${rowNota+1}`, valueInputOption: 'RAW', requestBody: { values: [[notaChiusura]] } });
+      }
     }
-    const opId = `op${newId()}`;
-    state.straOps.set(opId, { op_id: opId, tipo: 'annulla', id, creato: Date.now() });
+    const noteResponsabile = req.body.noteResponsabile;
+    if (noteResponsabile !== undefined) {
+      const rowNR = rows.findIndex((r,idx) => idx > 0 && r[0] === id);
+      if (rowNR > 0) {
+        // Nota di risoluzione del responsabile nella colonna dedicata P
+        await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!P${rowNR+1}`, valueInputOption: 'RAW', requestBody: { values: [[noteResponsabile]] } });
+      }
+    }
+    if (operaio !== undefined) {
+      const rowOp = rows.findIndex((r,idx) => idx > 0 && r[0] === id);
+      if (rowOp > 0) {
+        await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!D${rowOp+1}`, valueInputOption: 'RAW', requestBody: { values: [[operaio]] } });
+      }
+    }
+    await aggiornaRiga(id);
+    const mainRow = rows.find((r,idx) => idx > 0 && r[0] === id);
+    const collegato = mainRow && mainRow[10] ? mainRow[10] : null;
+    if (collegato) await aggiornaRiga(collegato);
+    const inverso = rows.find((r,idx) => idx > 0 && r[10] === id);
+    if (inverso && inverso[0] !== id) await aggiornaRiga(inverso[0]);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.post('/aggiungi-extra', async (req, res) => {
+  try {
+    const { idIntervento, attivita } = req.body;
+    const sheets = await getSheets();
+    const id = 'CHK-' + Math.random().toString(36).substring(2,10).toUpperCase();
+    await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: SH.CHECKLIST, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [[id, idIntervento, attivita, 'NO', '', '', 'SI']] } });
+    res.json({ ok: true, id });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.get('/dati-responsabile', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const [rImp, rCat, rInt, rChk, rAss, rPrat, rOff] = await Promise.all([
+      leggi(sheets, SH.IMPIANTI), leggi(sheets, SH.CATALOGO),
+      leggi(sheets, SH.INTERVENTI), leggi(sheets, SH.CHECKLIST),
+      leggi(sheets, SH.ASSENZE).catch(() => [[]]),
+      leggi(sheets, SH.PRATICHE).catch(() => [[]]),
+      leggi(sheets, SH.OFFERTE).catch(() => [[]]),
+    ]);
+    const impianti   = rImp.slice(1).filter(r=>r[0]).map(r=>({ codice:r[0]||'', descrizione:r[1]||'', comune:r[2]||'', indirizzo:r[3]||'', operaioDefault:r[4]||'' }));
+    const catalogo   = rCat.slice(1).filter(r=>r[0]).map(r=>({ codiceImpianto:r[0]||'', tipoVisita:r[1]||'', attivita:r[2]||'', ordine:Number(r[3])||0, obbligatoria:r[4]||'SI' }));
+    const interventi = rInt.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', codiceImpianto:r[1]||'', dataPrevista:fmtData(r[2]), operaio:r[3]||'', tipoVisita:r[4]||'', stato:r[5]||'', note:r[6]||'', dataChiusura:fmtData(r[7]), creatoIl:fmtData(r[8]), secondoOperaio:r[9]||'', interventoCollegato:r[10]||'', linkDrive:r[11]||'', dataFine:fmtData(r[12]), operaioSecondario2:r[13]||'', notaChiusura:r[14]||'', noteResponsabile:r[15]||'' }));
+    const checklist  = rChk.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', idIntervento:r[1]||'', attivita:r[2]||'', eseguita:r[3]||'NO', oraCompletamento:fmtDateTime(r[4]), note:r[5]||'', extra:r[6]||'NO' }));
+    const assenze    = rAss.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', operaio:r[1]||'', dataInizio:fmtData(r[2]), dataFine:fmtData(r[3]), tipo:r[4]||'', note:r[5]||'' }));
+    // Pratiche — 19 colonne A→S
+    const pratiche = rPrat.slice(1).filter(r=>r[0]).map(r=>({
+      id:               r[0]||'',
+      idIntervento:     r[1]||'',
+      codiceImpianto:   r[2]||'',
+      stato:            r[3]||'Richiesta',
+      dataRichiesta:    fmtData(r[4]),
+      noteRichiesta:    r[5]||'',
+      linkRichiesta:    r[6]||'',
+      dataPreventivo:   fmtData(r[7]),
+      importoPreventivo:r[8]||'',
+      linkPreventivo:   r[9]||'',
+      dataBdo:          fmtData(r[10]),
+      numeroBdo:        r[11]||'',
+      linkBdo:          r[12]||'',
+      dataDdt:          fmtData(r[13]),
+      numeroDdt:        r[14]||'',
+      linkDdt:          r[15]||'',
+      dataChiusura:     fmtData(r[16]),
+      noteChiusura:     r[17]||'',
+      creatoIl:         fmtData(r[18]),
+      inGestione:       r[19]==='SI',
+    }));
+    // Offerte — foglio separato
+    // A=ID | B=IDPratica | C=Fornitore | D=Descrizione | E=Importo | F=Data | G=LinkDrive | H=Selezionata | I=Note
+    const offerte = rOff.slice(1).filter(r=>r[0]).map(r=>({
+      id:          r[0]||'',
+      idPratica:   r[1]||'',
+      fornitore:   r[2]||'',
+      descrizione: r[3]||'',
+      importo:     r[4]||'',
+      data:        fmtData(r[5]),
+      linkDrive:   r[6]||'',
+      selezionata: r[7]==='SI',
+      note:        r[8]||'',
+    }));
+    res.json({ impianti, catalogo, interventi, checklist, assenze, pratiche, offerte });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.post('/crea-intervento', async (req, res) => {
+  try {
+    const { codiceImpianto, dataPrevista, operaio, tipoVisita, note, attivitaExtra } = req.body;
+    const statoIniziale      = req.body.statoOverride || 'Aperto';
+    const dataFine           = req.body.dataFine || '';
+    const operaioSecondario2 = req.body.operaioSecondario2 || '';
+    const sheets = await getSheets();
+    const id   = 'INT-' + Math.random().toString(36).substring(2,10).toUpperCase();
+    const oggi = new Date().toLocaleDateString('it-IT');
+    await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: SH.INTERVENTI, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [[id, codiceImpianto, dataPrevista, operaio, tipoVisita, statoIniziale, note||'', '', oggi, '', req.body.interventoCollegato||'', '', dataFine, operaioSecondario2]] } });
+    const rCat = await leggi(sheets, SH.CATALOGO);
+    const voci = rCat.slice(1).filter(r=>r[0]===codiceImpianto&&r[1]===tipoVisita).sort((a,b)=>(Number(a[3])||0)-(Number(b[3])||0));
+    const chkRows = voci.map(r => { const chkId='CHK-'+Math.random().toString(36).substring(2,10).toUpperCase(); return [chkId, id, r[2]||'', 'NO', '', '', 'NO']; });
+    if (attivitaExtra && attivitaExtra.length > 0) {
+      attivitaExtra.forEach(att => { const chkId='CHK-'+Math.random().toString(36).substring(2,10).toUpperCase(); chkRows.push([chkId, id, att, 'NO', '', '', 'SI']); });
+    }
+    if (chkRows.length > 0) {
+      await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: SH.CHECKLIST, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: chkRows } });
+    }
+// ── Notifica push ──
+    // Se l'intervento è nel Contenitore (nessun operaio) → avvisa tutti e 4
+    // gli operai, così qualcuno lo prende in carico. Altrimenti avvisa il singolo.
+    if (statoIniziale !== 'DaAssegnare') {
+      const rImp    = await leggi(sheets, SH.IMPIANTI);
+      const impRow  = rImp.slice(1).find(r => r[0] === codiceImpianto);
+      const nomeImp = impRow ? impRow[1] : codiceImpianto;
+      const dataFmt = new Date(dataPrevista + 'T00:00:00').toLocaleDateString('it-IT', { weekday:'short', day:'numeric', month:'short' });
+
+      const inContenitore = !operaio || operaio.toString().trim() === '';
+      if (inContenitore) {
+        await pushNotifica(sheets, ['Matteo', 'Stefano', 'Michele', 'Ezio'],
+          '📦 Nuova richiesta nel contenitore',
+          `${nomeImp} — ${tipoVisita} · ${dataFmt} · da prendere in carico`);
+      } else {
+        await pushNotifica(sheets, [operaio],
+          '📋 Nuovo intervento assegnato',
+          `${nomeImp} — ${tipoVisita} · ${dataFmt}`);
+      }
+    }
+    res.json({ ok: true, id });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.post('/elimina-intervento', async (req, res) => {
+  try {
+    const { id } = req.body;
+    const sheets = await getSheets();
+    const rChk = await leggi(sheets, SH.CHECKLIST);
+    const chkIdxs = rChk.map((r,i)=>i).filter(i=>i>0&&rChk[i][1]===id).reverse();
+    for (const idx of chkIdxs) {
+      await sheets.spreadsheets.batchUpdate({ spreadsheetId: SHEET_ID, requestBody: { requests: [{ deleteDimension: { range: { sheetId: await getSheetId(sheets, SH.CHECKLIST), dimension:'ROWS', startIndex:idx, endIndex:idx+1 } } }] } });
+    }
+    const rInt = await leggi(sheets, SH.INTERVENTI);
+    const intIdx = rInt.findIndex((r,i)=>i>0&&r[0]===id);
+    if (intIdx > 0) {
+      await sheets.spreadsheets.batchUpdate({ spreadsheetId: SHEET_ID, requestBody: { requests: [{ deleteDimension: { range: { sheetId: await getSheetId(sheets, SH.INTERVENTI), dimension:'ROWS', startIndex:intIdx, endIndex:intIdx+1 } } }] } });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.post('/crea-assenza', async (req, res) => {
+  try {
+    const { operaio, dataInizio, dataFine, tipo, note } = req.body;
+    const sheets = await getSheets();
+    const id = 'ASS-' + Math.random().toString(36).substring(2,10).toUpperCase();
+    await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: SH.ASSENZE, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [[id, operaio, dataInizio, dataFine, tipo, note||'']] } });
+    res.json({ ok: true, id });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.post('/elimina-assenza', async (req, res) => {
+  try {
+    const { id } = req.body;
+    const sheets = await getSheets();
+    const rAss = await leggi(sheets, SH.ASSENZE);
+    const idx = rAss.findIndex((r,i)=>i>0&&r[0]===id);
+    if (idx > 0) {
+      await sheets.spreadsheets.batchUpdate({ spreadsheetId: SHEET_ID, requestBody: { requests: [{ deleteDimension: { range: { sheetId: await getSheetId(sheets, SH.ASSENZE), dimension:'ROWS', startIndex:idx, endIndex:idx+1 } } }] } });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.post('/notifica-fmp', async (req, res) => {
+  try {
+    const { operaio, codiceImpianto, note, id } = req.body;
+    const sheets = await getSheets();
+    const rImp   = await leggi(sheets, SH.IMPIANTI);
+    const impRow = rImp.slice(1).find(r=>r[0]===codiceImpianto);
+    const nome   = impRow ? impRow[1] : codiceImpianto;
+    // Se la segnalazione non ha un operaio assegnato (es. impianto senza
+    // operaio di default), avvisa tutti e 4 così qualcuno la prende in carico.
+    const inContenitore = !operaio || operaio.toString().trim() === '' || operaio.toString().trim() === 'DaAssegnare';
+    const destinatari = inContenitore ? ['Matteo', 'Stefano', 'Michele', 'Ezio'] : [operaio];
+    await pushNotifica(sheets, destinatari, '🚨 Nuova segnalazione FMP', `${nome} — ${note.slice(0,80)}`);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.post('/imposta-collegamento', async (req, res) => {
+  try {
+    const { id, interventoCollegato } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.INTERVENTI);
+    const idx    = rows.findIndex((r,i)=>i>0&&r[0]===id);
+    if (idx < 1) return res.json({ ok: false });
+    await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!K${idx+1}`, valueInputOption: 'RAW', requestBody: { values: [[interventoCollegato]] } });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.post('/segnala-secondo', async (req, res) => {
+  try {
+    const { id, secondoOperaio } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.INTERVENTI);
+    const idx    = rows.findIndex((r,i)=>i>0&&r[0]===id);
+    if (idx < 1) return res.json({ ok: false, errore: 'Intervento non trovato' });
+    await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!J${idx+1}`, valueInputOption: 'RAW', requestBody: { values: [[secondoOperaio]] } });
+    if (secondoOperaio) {
+      const row = rows[idx];
+      const rImp = await leggi(sheets, SH.IMPIANTI);
+      const impRow = rImp.slice(1).find(r=>r[0]===row[1]);
+      const nomeImp = impRow ? impRow[1] : row[1];
+      const dataFmt = row[2] ? new Date(row[2]+'T00:00:00').toLocaleDateString('it-IT',{weekday:'short',day:'numeric',month:'short'}) : '';
+      await pushNotifica(sheets, [secondoOperaio], '👥 Richiesto il tuo supporto', `${nomeImp} · ${dataFmt} — insieme a ${row[3]}`);
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.post('/posticipa-intervento', async (req, res) => {
+  try {
+    const { id, nuovaData } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.INTERVENTI);
+    const idx    = rows.findIndex((r,i)=>i>0&&r[0]===id);
+    if (idx < 1) return res.json({ ok: false, errore: 'Intervento non trovato' });
+    await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!C${idx+1}`, valueInputOption: 'RAW', requestBody: { values: [[nuovaData]] } });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.post('/salva-catalogo', async (req, res) => {
+  try {
+    const { codiceImpianto, tipoVisita, attivita, ordine, obbligatoria } = req.body;
+    const sheets = await getSheets();
+    await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: SH.CATALOGO, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [[codiceImpianto, tipoVisita, attivita, ordine||1, obbligatoria||'SI']] } });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.post('/elimina-catalogo', async (req, res) => {
+  try {
+    const { codice, tipoVisita, attivita } = req.body;
+    const sheets = await getSheets();
+    const rows = await leggi(sheets, SH.CATALOGO);
+    const idx = rows.findIndex((r,i)=>i>0&&r[0]===codice&&r[1]===tipoVisita&&r[2]===attivita);
+    if (idx > 0) {
+      await sheets.spreadsheets.batchUpdate({ spreadsheetId: SHEET_ID, requestBody: { requests: [{ deleteDimension: { range: { sheetId: await getSheetId(sheets, SH.CATALOGO), dimension:'ROWS', startIndex:idx, endIndex:idx+1 } } }] } });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// ============================================================
+//  PRATICHE — CRUD COMPLETO
+//  Colonne foglio "Pratiche" (20 colonne, A→T):
+//  A=ID | B=IDIntervento | C=CodiceImpianto | D=Stato |
+//  E=DataRichiesta | F=NoteRichiesta | G=LinkRichiesta |
+//  H=DataPreventivo | I=ImportoPreventivo | J=LinkPreventivo |
+//  K=DataBdo | L=NumeroBdo | M=LinkBdo |
+//  N=DataDdt | O=NumeroDdt | P=LinkDdt |
+//  Q=DataChiusura | R=NoteChiusura | S=CreatoIl | T=InGestione
+//
+//  Stato iter: Richiesta → Offerta → Preventivo → BdO → DDT → Chiusa
+//  InGestione=SI bypassa il preventivo
+//  Gli interventi di realizzazione sono nel foglio Interventi con
+//  note contenente [PRA:ID] come riferimento alla pratica
+//  Le offerte sono gestite nel foglio separato "Offerte"
+// ============================================================
+
+// GET /pratiche
+app.get('/pratiche', async (req, res) => {
+  try {
+    const sheets   = await getSheets();
+    const rows     = await leggi(sheets, SH.PRATICHE).catch(() => []);
+    const pratiche = rows.slice(1).filter(r=>r[0]).map(r=>({
+      id:               r[0]||'',
+      idIntervento:     r[1]||'',
+      codiceImpianto:   r[2]||'',
+      stato:            r[3]||'Richiesta',
+      dataRichiesta:    fmtData(r[4]),
+      noteRichiesta:    r[5]||'',
+      linkRichiesta:    r[6]||'',
+      dataPreventivo:   fmtData(r[7]),
+      importoPreventivo:r[8]||'',
+      linkPreventivo:   r[9]||'',
+      dataBdo:          fmtData(r[10]),
+      numeroBdo:        r[11]||'',
+      linkBdo:          r[12]||'',
+      dataDdt:          fmtData(r[13]),
+      numeroDdt:        r[14]||'',
+      linkDdt:          r[15]||'',
+      dataChiusura:     fmtData(r[16]),
+      noteChiusura:     r[17]||'',
+      creatoIl:         fmtData(r[18]),
+      inGestione:       r[19]==='SI',
+    }));
+    res.json({ pratiche });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// POST /crea-pratica
+app.post('/crea-pratica', async (req, res) => {
+  try {
+    const { idIntervento, codiceImpianto, noteRichiesta, linkRichiesta } = req.body;
+    if (!codiceImpianto) return res.json({ ok: false, errore: 'codiceImpianto richiesto' });
+    const sheets  = await getSheets();
+    const id      = 'PRA-' + Math.random().toString(36).substring(2,10).toUpperCase();
+    const oggi    = new Date().toLocaleDateString('it-IT');
+    const dataOggi = new Date().toISOString().slice(0,10);
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID, range: SH.PRATICHE,
+      valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [[
+        id, idIntervento||'', codiceImpianto, 'Richiesta',
+        dataOggi, noteRichiesta||'', linkRichiesta||'',
+        '', '', '',   // preventivo
+        '', '', '',   // bdo
+        '', '', '',   // ddt
+        '', '',       // chiusura
+        oggi,         // creatoIl
+        'NO',         // inGestione
+      ]] },
+    });
+    res.json({ ok: true, id });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// POST /aggiorna-pratica
+app.post('/aggiorna-pratica', async (req, res) => {
+  try {
+    const { id, step, dati } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.PRATICHE);
+    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
+    if (idx < 1) return res.json({ ok: false, errore: 'Pratica non trovata' });
+
+    const STATI = ['Richiesta','Offerta','Preventivo','BdO','DDT','Chiusa'];
+
+    const stepMap = {
+      richiesta:  { range: `${SH.PRATICHE}!E${idx+1}:G${idx+1}`, fields: ['dataRichiesta','noteRichiesta','linkRichiesta'],      statoNew: 'Richiesta' },
+      preventivo: { range: `${SH.PRATICHE}!H${idx+1}:J${idx+1}`, fields: ['dataPreventivo','importoPreventivo','linkPreventivo'], statoNew: 'Preventivo' },
+      bdo:        { range: `${SH.PRATICHE}!K${idx+1}:M${idx+1}`, fields: ['dataBdo','numeroBdo','linkBdo'],                      statoNew: 'BdO' },
+      ddt:        { range: `${SH.PRATICHE}!N${idx+1}:P${idx+1}`, fields: ['dataDdt','numeroDdt','linkDdt'],                      statoNew: 'DDT' },
+      chiuso:     { range: `${SH.PRATICHE}!Q${idx+1}:R${idx+1}`, fields: ['dataChiusura','noteChiusura'],                        statoNew: 'Chiusa' },
+    };
+
+    const s = stepMap[step];
+    if (!s) return res.json({ ok: false, errore: 'Step non valido' });
+
+    const values = s.fields.map((f,fi) => dati[f] !== undefined ? dati[f] : (rows[idx][7+fi] || ''));
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID, range: s.range,
+      valueInputOption: 'RAW', requestBody: { values: [values] },
+    });
+
+    // Avanza stato solo in avanti
+    const statoAttuale = rows[idx][3] || 'Richiesta';
+    const idxAtt = STATI.indexOf(statoAttuale);
+    const idxNuo = STATI.indexOf(s.statoNew);
+    if (idxNuo > idxAtt) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID, range: `${SH.PRATICHE}!D${idx+1}`,
+        valueInputOption: 'RAW', requestBody: { values: [[s.statoNew]] },
+      });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// POST /avanza-stato-offerta — porta pratica in stato "Offerta" quando si aggiunge la prima offerta
+app.post('/avanza-stato-offerta', async (req, res) => {
+  try {
+    const { id } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.PRATICHE);
+    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
+    if (idx < 1) return res.json({ ok: false, errore: 'Pratica non trovata' });
+    const STATI = ['Richiesta','Offerta','Preventivo','BdO','DDT','Chiusa'];
+    const statoAtt = rows[idx][3] || 'Richiesta';
+    if (STATI.indexOf(statoAtt) < STATI.indexOf('Offerta')) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID, range: `${SH.PRATICHE}!D${idx+1}`,
+        valueInputOption: 'RAW', requestBody: { values: [['Offerta']] },
+      });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// POST /imposta-gestione — segna pratica come "in gestione" e avanza a BdO
+app.post('/imposta-gestione', async (req, res) => {
+  try {
+    const { id, valore } = req.body; // valore: true/false
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.PRATICHE);
+    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
+    if (idx < 1) return res.json({ ok: false, errore: 'Pratica non trovata' });
+    // Salva flag in colonna T (indice 19)
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID, range: `${SH.PRATICHE}!T${idx+1}`,
+      valueInputOption: 'RAW', requestBody: { values: [[valore ? 'SI' : 'NO']] },
+    });
+    // Se attivato, avanza stato a BdO (salta Preventivo)
+    if (valore) {
+      const STATI = ['Richiesta','Offerta','Preventivo','BdO','DDT','Chiusa'];
+      const statoAtt = rows[idx][3] || 'Richiesta';
+      if (STATI.indexOf(statoAtt) < STATI.indexOf('BdO')) {
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: SHEET_ID, range: `${SH.PRATICHE}!D${idx+1}`,
+          valueInputOption: 'RAW', requestBody: { values: [['BdO']] },
+        });
+      }
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// POST /elimina-pratica
+app.post('/elimina-pratica', async (req, res) => {
+  try {
+    const { id } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.PRATICHE);
+    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
+    if (idx > 0) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: { requests: [{ deleteDimension: { range: { sheetId: await getSheetId(sheets, SH.PRATICHE), dimension:'ROWS', startIndex:idx, endIndex:idx+1 } } }] },
+      });
+    }
+    // Elimina anche le offerte collegate
+    const rOff = await leggi(sheets, SH.OFFERTE).catch(() => []);
+    const idxOff = rOff.map((r,i)=>i).filter(i=>i>0&&rOff[i][1]===id).reverse();
+    for (const io of idxOff) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: { requests: [{ deleteDimension: { range: { sheetId: await getSheetId(sheets, SH.OFFERTE), dimension:'ROWS', startIndex:io, endIndex:io+1 } } }] },
+      });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// ============================================================
+//  OFFERTE — foglio separato
+//  Colonne: A=ID | B=IDPratica | C=Fornitore | D=Descrizione |
+//           E=Importo | F=Data | G=LinkDrive | H=Selezionata | I=Note
+// ============================================================
+
+// GET /offerte?idPratica=PRA-XXX
+app.get('/offerte', async (req, res) => {
+  try {
+    const { idPratica } = req.query;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.OFFERTE).catch(() => []);
+    const offerte = rows.slice(1).filter(r=>r[0]&&(!idPratica||r[1]===idPratica)).map(r=>({
+      id:          r[0]||'',
+      idPratica:   r[1]||'',
+      fornitore:   r[2]||'',
+      descrizione: r[3]||'',
+      importo:     r[4]||'',
+      data:        fmtData(r[5]),
+      linkDrive:   r[6]||'',
+      selezionata: r[7]==='SI',
+      note:        r[8]||'',
+    }));
+    res.json({ offerte });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// POST /crea-offerta
+app.post('/crea-offerta', async (req, res) => {
+  try {
+    const { idPratica, fornitore, descrizione, importo, data, linkDrive, note } = req.body;
+    if (!idPratica || !fornitore) return res.json({ ok: false, errore: 'idPratica e fornitore richiesti' });
+    const sheets = await getSheets();
+    const id     = 'OFF-' + Math.random().toString(36).substring(2,10).toUpperCase();
+    const oggi   = data || new Date().toISOString().slice(0,10);
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID, range: SH.OFFERTE,
+      valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [[id, idPratica, fornitore, descrizione||'', importo||'', oggi, linkDrive||'', 'NO', note||'']] },
+    });
+    // Porta pratica in stato Offerta se era ancora in Richiesta
+    const rows = await leggi(sheets, SH.PRATICHE);
+    const idx  = rows.findIndex((r,i) => i > 0 && r[0] === idPratica);
+    if (idx > 0) {
+      const STATI = ['Richiesta','Offerta','Preventivo','BdO','DDT','Chiusa'];
+      const statoAtt = rows[idx][3] || 'Richiesta';
+      if (STATI.indexOf(statoAtt) < STATI.indexOf('Offerta')) {
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: SHEET_ID, range: `${SH.PRATICHE}!D${idx+1}`,
+          valueInputOption: 'RAW', requestBody: { values: [['Offerta']] },
+        });
+      }
+    }
+    res.json({ ok: true, id });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// POST /seleziona-offerta — seleziona o deseleziona un'offerta
+// id: ID offerta da selezionare, oppure null per deselezionare tutte
+app.post('/seleziona-offerta', async (req, res) => {
+  try {
+    const { id, idPratica } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.OFFERTE);
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][1] === idPratica) {
+        const sel = (id && rows[i][0] === id) ? 'SI' : 'NO';
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: SHEET_ID, range: `${SH.OFFERTE}!H${i+1}`,
+          valueInputOption: 'RAW', requestBody: { values: [[sel]] },
+        });
+      }
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// POST /elimina-offerta
+app.post('/elimina-offerta', async (req, res) => {
+  try {
+    const { id } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.OFFERTE);
+    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
+    if (idx > 0) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: { requests: [{ deleteDimension: { range: { sheetId: await getSheetId(sheets, SH.OFFERTE), dimension:'ROWS', startIndex:idx, endIndex:idx+1 } } }] },
+      });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// ============================================================
+//  GET /rdacat / POST /crea-rdacat / POST /aggiorna-rdacat / POST /elimina-rdacat
+// ============================================================
+app.get('/rdacat', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.RDACAT).catch(() => []);
+    const richieste = rows.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', idIntervento:r[1]||'', codiceImpianto:r[2]||'', tipologia:r[3]||'', nota:r[4]||'', operaio:r[5]||'', stato:r[6]||'Inviata', creatoIl:r[7]||'', aggiornatoIl:r[8]||'' }));
+    res.json({ richieste });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.post('/crea-rdacat', async (req, res) => {
+  try {
+    const { idIntervento, codiceImpianto, tipologia, nota, operaio } = req.body;
+    const sheets = await getSheets();
+    const id     = 'RDA-' + Math.random().toString(36).substring(2,10).toUpperCase();
+    const oggi   = new Date().toLocaleDateString('it-IT');
+    await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: SH.RDACAT, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [[id, idIntervento, codiceImpianto, tipologia, nota, operaio, 'Inviata', oggi, '']] } });
+    res.json({ ok: true, id });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.post('/aggiorna-rdacat', async (req, res) => {
+  try {
+    const { id, stato } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.RDACAT);
+    const idx    = rows.findIndex((r,i)=>i>0&&r[0]===id);
+    if (idx < 1) return res.json({ ok: false, errore: 'RDA non trovata' });
+    const oggi = new Date().toLocaleDateString('it-IT');
+    await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.RDACAT}!G${idx+1}:I${idx+1}`, valueInputOption: 'RAW', requestBody: { values: [[stato, rows[idx][7], oggi]] } });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.post('/elimina-rdacat', async (req, res) => {
+  try {
+    const { id } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.RDACAT);
+    const idx    = rows.findIndex((r,i)=>i>0&&r[0]===id);
+    if (idx > 0) {
+      await sheets.spreadsheets.batchUpdate({ spreadsheetId: SHEET_ID, requestBody: { requests: [{ deleteDimension: { range: { sheetId: await getSheetId(sheets, SH.RDACAT), dimension:'ROWS', startIndex:idx, endIndex:idx+1 } } }] } });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// ============================================================
+//  REPERIBILITA
+// ============================================================
+app.get('/reperibile', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.REPERIBILITA).catch(() => []);
+    const oggi   = new Date();
+    const dow    = oggi.getDay() === 0 ? 6 : oggi.getDay() - 1;
+    const lun    = new Date(oggi); lun.setDate(oggi.getDate() - dow); lun.setHours(0,0,0,0);
+    const lunStr = lun.toISOString().slice(0,10);
+    const riga   = rows.slice(1).find(r => { if(!r[0]) return false; try { const d=new Date(r[0]); return d.toISOString().slice(0,10)===lunStr; } catch(e){return false;} });
+    const settimane = [];
+    for (let i=-2; i<=6; i++) {
+      const s = new Date(lun); s.setDate(lun.getDate()+i*7);
+      const sStr = s.toISOString().slice(0,10);
+      const rigaS = rows.slice(1).find(r=>{ try{return new Date(r[0]).toISOString().slice(0,10)===sStr;}catch(e){return false;} });
+      settimane.push({ data:sStr, operaio:rigaS?rigaS[1]:'' });
+    }
+    res.json({ corrente:{ data:lunStr, operaio:riga?riga[1]:null }, settimane });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.post('/salva-reperibile', async (req, res) => {
+  try {
+    const { data, operaio } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.REPERIBILITA).catch(() => []);
+    const idx    = rows.findIndex((r,i)=>{ if(i===0||!r[0]) return false; try{return new Date(r[0]).toISOString().slice(0,10)===data;}catch(e){return false;} });
+    if (idx > 0) {
+      await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.REPERIBILITA}!A${idx+1}:B${idx+1}`, valueInputOption: 'RAW', requestBody: { values: [[data, operaio]] } });
+    } else {
+      await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: SH.REPERIBILITA, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [[data, operaio]] } });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.post('/salva-link-drive', async (req, res) => {
+  try {
+    const { id, tipo, linkDrive } = req.body;
+    const foglio = SH.INTERVENTI;
+    const rows   = await (await getSheets()).spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: foglio }).then(r=>r.data.values||[]);
+    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
+    if (idx < 1) return res.json({ ok: false, errore: 'Record non trovato' });
+    const sheets = await getSheets();
+    await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${foglio}!L${idx+1}`, valueInputOption: 'RAW', requestBody: { values: [[linkDrive]] } });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.post('/aggiorna-multigiorno', async (req, res) => {
+  try {
+    const { id, dataFine, operaioSecondario2 } = req.body;
+    const sheets = await getSheets();
+    const rows   = await leggi(sheets, SH.INTERVENTI);
+    const idx    = rows.findIndex((r,i)=>i>0&&r[0]===id);
+    if (idx < 1) return res.json({ ok: false, errore: 'Intervento non trovato' });
+    await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!M${idx+1}:N${idx+1}`, valueInputOption: 'RAW', requestBody: { values: [[dataFine||'', operaioSecondario2||'']] } });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+async function getSheetId(sheets, name) {
+  const meta  = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+  const sheet = meta.data.sheets.find(s => s.properties.title === name);
+  if (!sheet) throw new Error('Foglio non trovato: ' + name);
+  return sheet.properties.sheetId;
+}
+
+// GET /preventivi — stub per compatibilità con client vecchi
+app.get('/preventivi', (req, res) => res.json({ preventivi: [] }));
+app.post('/richiedi-preventivo', (req, res) => res.json({ ok: true, id: 'PREV-' + Math.random().toString(36).substring(2,10).toUpperCase() }));
+
+// ============================================================
+//  SCADENZE RCEE — GET /scadenze-rcee
+//  Legge il foglio "ScadenzeRCEE" (colonne individuate dal nome in
+//  riga 1), raggruppa per Codice Impianto (un RCEE = un impianto),
+//  e restituisce le scadenze ordinate per giorni mancanti crescenti.
+// ============================================================
+app.get('/scadenze-rcee', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const resp = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: 'ScadenzeRCEE',
+      valueRenderOption: 'FORMATTED_VALUE',
+    });
+    const rows = resp.data.values || [];
+    if (rows.length < 2) return res.json({ ok: true, scadenze: [] });
+
+    const norm = (s) => (s || '').toString().toLowerCase()
+      .replace(/[àáâ]/g,'a').replace(/[èé]/g,'e').replace(/[ìí]/g,'i')
+      .replace(/[òó]/g,'o').replace(/[ùú]/g,'u').replace(/[^a-z0-9]/g,'');
+    const H = rows[0].map(norm);
+    const find = (pred) => { for (let i=0;i<H.length;i++) if (pred(H[i])) return i; return -1; };
+    const C = {
+      targa:  find(h => h.indexOf('targat') >= 0),
+      imp:    find(h => h === 'codiceimpianto' || (h.indexOf('impianto')>=0 && h.indexOf('codice')>=0 && h.indexOf('potenza')<0)),
+      anag:   find(h => h.indexOf('anagrafica') >= 0),
+      desc:   find(h => h.indexOf('descrizione') >= 0),
+      comm:   find(h => h.indexOf('commessa') >= 0),
+      alim:   find(h => h.indexOf('alimentazione') >= 0),
+      pottot: find(h => h.indexOf('potenza')>=0 && h.indexOf('impianto')>=0),
+      ult:    find(h => h.indexOf('ultimo') >= 0),
+      per:    find(h => h.indexOf('periodic') >= 0),
+      prox:   find(h => h.indexOf('prossima')>=0 || h.indexOf('scadenza')>=0),
+      giorni: find(h => h.indexOf('giorni') >= 0),
+      stato:  find(h => h.indexOf('stato') >= 0),
+    };
+    const g = (r, i) => (i >= 0 && r[i] !== undefined) ? r[i] : '';
+
+    const perImpianto = {};
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      const cod  = (g(r, C.imp)  || '').toString().trim();
+      const anag = (g(r, C.anag) || '').toString().trim();
+      if (!cod && !anag) continue;
+      const stato = (g(r, C.stato) || '').toString().trim().toUpperCase();
+      if (!(stato === 'OK' || stato === 'IN SCADENZA' || stato === 'SCADUTO')) continue;
+
+      const key = cod || ('ANAG:' + anag);
+      if (!perImpianto[key]) {
+        perImpianto[key] = {
+          codiceImpianto: cod,
+          codiceAnagrafica: anag,
+          targa: (g(r, C.targa) || '').toString().trim(),
+          descrizione: (g(r, C.desc) || '').toString().trim(),
+          commessa: (g(r, C.comm) || '').toString().trim(),
+          alimentazione: (g(r, C.alim) || '').toString().trim(),
+          potenzaImpianto: (g(r, C.pottot) || '').toString().trim(),
+          dataUltimo: (g(r, C.ult) || '').toString().trim(),
+          periodicita: (g(r, C.per) || '').toString().trim(),
+          prossimaScadenza: (g(r, C.prox) || '').toString().trim(),
+          giorni: parseInt((g(r, C.giorni) || '').toString().replace(/[^\-0-9]/g, ''), 10),
+          stato: stato,
+          nGeneratori: 0,
+        };
+      }
+      perImpianto[key].nGeneratori++;
+    }
+
+    const scadenze = Object.values(perImpianto).sort((a, b) => {
+      const ga = isNaN(a.giorni) ? 1e9 : a.giorni;
+      const gb = isNaN(b.giorni) ? 1e9 : b.giorni;
+      return ga - gb;
+    });
+
+    res.json({ ok: true, scadenze });
+  } catch (err) {
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
+// ============================================================
+//  LETTURE CONTATORI
+//
+//  Foglio "Contatori" (generato da CostruisciContatori.gs):
+//   A=IdContatore | B=CodiceImpianto | C=CodiceIT | D=CodElem |
+//   E=Fascia | F=Vettore | G=Tipo | H=DescrizioneElemento |
+//   I=Unita | J=DescrizioneImport | K=UltimaLettura |
+//   L=DataUltimaLettura | M=RigaImport | N=Attivo | O=Ordine | P=StatoMerge
+//
+//  Foglio "Letture" (storico, append/aggiorna):
+//   A=ID | B=DataOra | C=IdContatore | D=CodiceImpianto | E=CodiceIT |
+//   F=CodElem | G=Fascia | H=Operaio | I=Valore | J=Unita |
+//   K=Evento | L=Commenti | M=MeseCompetenza | N=Lat | O=Lon |
+//   P=LetturaPrecedente | Q=Consumo | R=StringaImport
+//
+//  La stringa di importazione nasce insieme alla riga:
+//   CODICE_IT ; COD_ELEM ; FASCIA ; ; AAAAMMGG ; ; ; LETTURA ;
+//   es. IT045643Y;5;;;20260724;;;6989;   (decimali con la virgola)
+//  Contatore non letto = nessuna riga = nessuna stringa: l'assenza viene
+//  segnalata come anomalia dal gestionale, invece di passare inosservata
+//  come farebbe una lettura vecchia ridatata.
+//
+//  Foglio "Config": A=Chiave | B=Valore
+//   GIORNI_LETTURA           default, es. "19,20,21,22,23,24"
+//   GIORNI_LETTURA_2026-08   override del singolo mese (vince sul default)
+//   DATA_CAMPAGNA_2026-08    data che finisce nella stringa di importazione
+//   LETTURE_SEMPRE_APERTE    "SI" per disattivare il blocco sui giorni
+//
+//  I giorni cambiano di mese in mese: si aggiunge la riga del mese quando
+//  vengono comunicati. Se la riga del mese manca, vale GIORNI_LETTURA.
+//  Le stesse chiavi sono lette da GeneraImportazione.gs: server e script
+//  devono vedere la stessa finestra.
+// ============================================================
+
+const GIORNI_LETTURA_DEFAULT = [19, 20, 21, 22, 23, 24];
+const EVENTI_LETTURA = ['LETTURA NORMALE', 'GUASTO'];
+
+// Data odierna in fuso italiano, formato yyyy-MM-dd
+function oggiItalia() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Rome' });
+}
+
+// Numeri con virgola decimale: "1063,15" -> 1063.15 ; "1.234,5" -> 1234.5
+function numLettura(v) {
+  if (v === null || v === undefined || v === '') return null;
+  if (typeof v === 'number') return v;
+  let s = v.toString().trim();
+  if (!s) return null;
+  if (s.indexOf(',') >= 0) s = s.replace(/\./g, '').replace(',', '.');
+  const n = parseFloat(s);
+  return isNaN(n) ? null : n;
+}
+
+function normIntestazione(s) {
+  return (s || '').toString().toLowerCase()
+    .replace(/[àáâ]/g,'a').replace(/[èé]/g,'e').replace(/[ìí]/g,'i')
+    .replace(/[òó]/g,'o').replace(/[ùú]/g,'u').replace(/[^a-z0-9]/g,'');
+}
+
+// Il valore dentro la stringa vuole la virgola: 215.9 -> "215,9"
+function valoreStringa(v) {
+  if (v === null || v === undefined || v === '') return '';
+  const n = Math.round(Number(v) * 1000) / 1000;   // toglie il rumore dei float
+  return String(n).replace('.', ',');
+}
+
+/**
+ * Stringa di importazione, stesso tracciato della formula nel file importazioni:
+ *   =CONCATENA(N;O;P;Q;R;S;V;U;T;W;X;Y)
+ *   CODICE_IT ; COD_ELEM ; FASCIA ; ; AAAAMMGG ; ; ; LETTURA ;
+ * dataCampagna arriva come 'yyyy-MM-dd' ed e' UGUALE per tutte le righe del
+ * mese: non e' la data in cui l'operaio ha letto.
+ */
+function costruisciStringa(codiceIT, codElem, fascia, dataCampagna, valore) {
+  const aaaammgg = (dataCampagna || oggiItalia()).replace(/-/g, '');
+  return [
+    codiceIT || '',
+    codElem || '',
+    fascia || '',
+    '',
+    aaaammgg,
+    '',
+    '',
+    valoreStringa(valore),
+    '',
+  ].join(';');
+}
+
+// Individua le colonne per nome, con posizione di riserva
+function mappaColonne(intestazioni, definizioni) {
+  const H = (intestazioni || []).map(normIntestazione);
+  const out = {};
+  Object.keys(definizioni).forEach(campo => {
+    const def = definizioni[campo];
+    let idx = H.indexOf(normIntestazione(def.nome));
+    if (idx < 0) idx = def.pos;
+    out[campo] = idx;
+  });
+  return out;
+}
+
+const COL_CONTATORI = {
+  id:        { nome: 'IdContatore',         pos: 0 },
+  impianto:  { nome: 'CodiceImpianto',      pos: 1 },
+  codiceIT:  { nome: 'CodiceIT',            pos: 2 },
+  codElem:   { nome: 'CodElem',             pos: 3 },
+  fascia:    { nome: 'Fascia',              pos: 4 },
+  vettore:   { nome: 'Vettore',             pos: 5 },
+  tipo:      { nome: 'Tipo',                pos: 6 },
+  descr:     { nome: 'DescrizioneElemento', pos: 7 },
+  unita:     { nome: 'Unita',               pos: 8 },
+  ultima:    { nome: 'UltimaLettura',       pos: 10 },
+  dataUltima:{ nome: 'DataUltimaLettura',   pos: 11 },
+  attivo:    { nome: 'Attivo',              pos: 13 },
+  ordine:    { nome: 'Ordine',              pos: 14 },
+  statoMerge:{ nome: 'StatoMerge',          pos: 15 },
+};
+
+// "19,20,21 22-23" -> [19,20,21,22,23]
+function parseGiorni(v) {
+  const parsed = (v || '').toString().split(/[^0-9]+/)
+    .map(x => parseInt(x, 10))
+    .filter(n => !isNaN(n) && n >= 1 && n <= 31);
+  return parsed.length ? Array.from(new Set(parsed)).sort((a, b) => a - b) : null;
+}
+
+// Mese successivo a 'yyyy-MM'
+function meseDopo(mese) {
+  let a = parseInt(mese.slice(0, 4), 10);
+  let m = parseInt(mese.slice(5, 7), 10) + 1;
+  if (m > 12) { m = 1; a++; }
+  return a + '-' + String(m).padStart(2, '0');
+}
+
+// Legge la configurazione letture dal foglio Config (assente = default).
+// I giorni possono essere definiti per singolo mese: la chiave del mese
+// vince sul default generico.
+async function configLetture(sheets) {
+  const oggi       = oggiItalia();                    // yyyy-MM-dd
+  const meseOggi   = oggi.slice(0, 7);
+  const giornoOggi = parseInt(oggi.slice(8, 10), 10);
+
+  let generici     = null;
+  let sempreAperte = false;
+  const perMese    = {};   // '2026-08' -> [giorni]
+  const campagne   = {};   // '2026-08' -> '2026-08-24'
+
+  try {
+    const rows = await leggi(sheets, SH.CONFIG);
+    rows.slice(1).forEach(r => {
+      const k = (r[0] || '').toString().trim().toUpperCase();
+      const v = (r[1] || '').toString().trim();
+      if (!k || !v) return;
+
+      if (k === 'LETTURE_SEMPRE_APERTE') {
+        sempreAperte = v.toUpperCase() === 'SI';
+      } else if (k === 'GIORNI_LETTURA') {
+        generici = parseGiorni(v);
+      } else if (k.indexOf('GIORNI_LETTURA_') === 0) {
+        const m = k.slice('GIORNI_LETTURA_'.length);
+        if (/^\d{4}-\d{2}$/.test(m)) {
+          const g = parseGiorni(v);
+          if (g) perMese[m] = g;
+        }
+      } else if (k.indexOf('DATA_CAMPAGNA_') === 0) {
+        const m = k.slice('DATA_CAMPAGNA_'.length);
+        if (/^\d{4}-\d{2}$/.test(m)) campagne[m] = v;
+      }
+    });
+  } catch (e) {
+    console.warn('Foglio Config assente o illeggibile — uso i giorni di default');
+  }
+
+  // Giorni validi per un dato mese, con la loro provenienza
+  function giorniDi(mese) {
+    if (perMese[mese]) return { giorni: perMese[mese], fonte: 'GIORNI_LETTURA_' + mese };
+    if (generici)      return { giorni: generici,      fonte: 'GIORNI_LETTURA' };
+    return { giorni: GIORNI_LETTURA_DEFAULT.slice(), fonte: 'default nel codice' };
+  }
+
+  const corrente   = giorniDi(meseOggi);
+  const giorni     = corrente.giorni;
+  const apertoOggi = sempreAperte || giorni.indexOf(giornoOggi) >= 0;
+
+  // Prossimo giorno utile: in questo mese se ce n'è ancora uno, altrimenti
+  // il primo del mese dopo — che può avere una finestra diversa.
+  let prossimaFinestra = '';
+  const prossimo = giorni.find(g => g >= giornoOggi);
+  if (prossimo !== undefined) {
+    prossimaFinestra = String(prossimo).padStart(2, '0') + '/' + meseOggi.slice(5, 7);
+  } else {
+    const mp = meseDopo(meseOggi);
+    const gp = giorniDi(mp).giorni;
+    if (gp.length) prossimaFinestra = String(gp[0]).padStart(2, '0') + '/' + mp.slice(5, 7);
+  }
+
+  // Data di campagna del mese: se non configurata, l'ultimo giorno della finestra
+  let dataCampagna = campagne[meseOggi] || '';
+  let fonteData    = dataCampagna ? ('DATA_CAMPAGNA_' + meseOggi) : '';
+  if (!dataCampagna && giorni.length) {
+    dataCampagna = meseOggi + '-' + String(giorni[giorni.length - 1]).padStart(2, '0');
+    fonteData    = 'ultimo giorno della finestra';
+  }
+
+  return {
+    giorni,
+    fonteGiorni: corrente.fonte,
+    mesiConfigurati: Object.keys(perMese).sort(),
+    dataCampagna,
+    fonteData,
+    sempreAperte,
+    apertoOggi,
+    oggi,
+    giornoOggi,
+    prossimaFinestra,
+  };
+}
+
+// GET /config-letture
+app.get('/config-letture', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const cfg    = await configLetture(sheets);
+    res.json({ ok: true, ...cfg, eventi: EVENTI_LETTURA });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// GET /letture-dati
+// Restituisce config + anagrafica contatori (con ultima lettura disponibile)
+// + le letture del mese di competenza corrente.
+app.get('/letture-dati', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const [rCon, rLet, cfg] = await Promise.all([
+      leggi(sheets, SH.CONTATORI).catch(() => []),
+      leggi(sheets, SH.LETTURE).catch(() => []),
+      configLetture(sheets),
+    ]);
+
+    if (rCon.length < 2) {
+      return res.json({ ok: true, ...cfg, contatori: [], letture: [],
+        avviso: 'Foglio Contatori vuoto — lancia costruisciContatori() in Apps Script' });
+    }
+
+    const C = mappaColonne(rCon[0], COL_CONTATORI);
+    const g = (r, i) => (i >= 0 && r[i] !== undefined && r[i] !== null) ? r[i].toString().trim() : '';
+
+    // Storico letture indicizzato per contatore.
+    // L'ultima lettura di riferimento e' l'ultima riga di un mese DIVERSO da
+    // quello corrente: la lettura appena inserita non deve diventare la
+    // "precedente" di se stessa. Stessa regola usata da /salva-lettura.
+    const ultimaDaLetture = {};
+    const lettureMese     = [];
+    const meseCorrente    = cfg.oggi.slice(0, 7);
+
+    rLet.slice(1).forEach(r => {
+      const idc = (r[2] || '').toString().trim();
+      if (!idc) return;
+      const meseRiga = (r[12] || '').toString().trim();
+
+      if (meseRiga !== meseCorrente) {
+        ultimaDaLetture[idc] = {
+          valore: numLettura(r[8]),
+          data:   (r[1] || '').toString().trim(),
+        };
+      } else {
+        lettureMese.push({
+          id:          (r[0] || '').toString(),
+          dataOra:     (r[1] || '').toString(),
+          idContatore: idc,
+          operaio:     (r[7] || '').toString(),
+          valore:      numLettura(r[8]),
+          evento:      (r[10] || '').toString(),
+          commenti:    (r[11] || '').toString(),
+          consumo:     numLettura(r[16]),
+          stringa:     (r[17] || '').toString(),
+        });
+      }
+    });
+
+    const contatori = rCon.slice(1).filter(r => g(r, C.id)).map(r => {
+      const id  = g(r, C.id);
+      const ult = ultimaDaLetture[id];
+      return {
+        id,
+        codiceImpianto: g(r, C.impianto),
+        codiceIT:       g(r, C.codiceIT),
+        codElem:        g(r, C.codElem),
+        fascia:         g(r, C.fascia),
+        vettore:        g(r, C.vettore),
+        tipo:           g(r, C.tipo),
+        descrizione:    g(r, C.descr),
+        unita:          g(r, C.unita),
+        ordine:         parseInt(g(r, C.ordine), 10) || 99,
+        attivo:         (g(r, C.attivo) || 'SI').toUpperCase() !== 'NO',
+        statoMerge:     g(r, C.statoMerge),
+        ultimaLettura:      ult ? ult.valore : numLettura(g(r, C.ultima)),
+        dataUltimaLettura:  ult ? ult.data   : g(r, C.dataUltima),
+        origineUltima:      ult ? 'app' : 'import',
+      };
+    }).filter(c => c.attivo && c.codiceImpianto && c.statoMerge !== 'IMPIANTO NON TROVATO');
+
+    res.json({ ok: true, ...cfg, contatori, letture: lettureMese, meseCorrente });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// POST /salva-lettura
+// body: { idContatore, valore, evento, commenti, operaio, lat, lon }
+// Una sola lettura per contatore per mese di competenza: se esiste già,
+// la riga viene aggiornata invece di crearne una seconda.
+app.post('/salva-lettura', async (req, res) => {
+  try {
+    const { idContatore, valore, evento, commenti, operaio, lat, lon } = req.body;
+    if (!idContatore || !operaio) return res.json({ ok: false, errore: 'idContatore e operaio richiesti' });
+
+    const val = numLettura(valore);
+    if (val === null) return res.json({ ok: false, errore: 'Valore non numerico' });
+
+    const sheets = await getSheets();
+    const cfg    = await configLetture(sheets);
+    if (!cfg.apertoOggi) {
+      return res.json({ ok: false, chiuso: true,
+        errore: 'Le letture sono aperte solo nei giorni ' + cfg.giorni.join(', ') + ' del mese' });
+    }
+
+    const rCon = await leggi(sheets, SH.CONTATORI).catch(() => []);
+    if (rCon.length < 2) return res.json({ ok: false, errore: 'Foglio Contatori vuoto' });
+    const C = mappaColonne(rCon[0], COL_CONTATORI);
+    const g = (r, i) => (i >= 0 && r[i] !== undefined && r[i] !== null) ? r[i].toString().trim() : '';
+
+    const riga = rCon.slice(1).find(r => g(r, C.id) === idContatore);
+    if (!riga) return res.json({ ok: false, errore: 'Contatore non trovato: ' + idContatore });
+
+    const rLet = await leggi(sheets, SH.LETTURE).catch(() => []);
+    const mese = cfg.oggi.slice(0, 7);
+
+    // Lettura precedente = ultima riga in Letture di un mese diverso,
+    // altrimenti il valore di bootstrap dal file importazioni.
+    let precedente = null;
+    for (let i = rLet.length - 1; i >= 1; i--) {
+      const r = rLet[i];
+      if ((r[2] || '').toString().trim() !== idContatore) continue;
+      if ((r[12] || '').toString().trim() === mese) continue;
+      precedente = numLettura(r[8]);
+      break;
+    }
+    if (precedente === null) precedente = numLettura(g(riga, C.ultima));
+
+    const consumo = (precedente !== null && val >= precedente) ? +(val - precedente).toFixed(3) : '';
+    const ora = new Date().toLocaleString('it-IT', {
+      day:'2-digit', month:'2-digit', year:'numeric',
+      hour:'2-digit', minute:'2-digit', timeZone:'Europe/Rome'
+    });
+
+    const eventoFinale = EVENTI_LETTURA.indexOf((evento || '').toUpperCase()) >= 0
+      ? evento.toUpperCase() : EVENTI_LETTURA[0];
+
+    // La stringa nasce insieme alla riga, con la data di campagna del mese
+    const stringa = costruisciStringa(
+      g(riga, C.codiceIT), g(riga, C.codElem), g(riga, C.fascia),
+      cfg.dataCampagna, val
+    );
+
+    // Riga già presente per questo contatore nel mese corrente?
+    const idxEsistente = rLet.findIndex((r, i) =>
+      i > 0 &&
+      (r[2] || '').toString().trim() === idContatore &&
+      (r[12] || '').toString().trim() === mese
+    );
+
+    const valori = [
+      idxEsistente > 0 ? (rLet[idxEsistente][0] || '') : ('LET-' + Math.random().toString(36).substring(2,10).toUpperCase()),
+      ora,
+      idContatore,
+      g(riga, C.impianto),
+      g(riga, C.codiceIT),
+      g(riga, C.codElem),
+      g(riga, C.fascia),
+      operaio,
+      val,
+      g(riga, C.unita),
+      eventoFinale,
+      commenti || '',
+      mese,
+      lat != null ? lat : '',
+      lon != null ? lon : '',
+      precedente !== null ? precedente : '',
+      consumo,
+      stringa,
+    ];
+
+    if (idxEsistente > 0) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: `${SH.LETTURE}!A${idxEsistente+1}:R${idxEsistente+1}`,
+        valueInputOption: 'RAW', requestBody: { values: [valori] },
+      });
+    } else {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SHEET_ID, range: SH.LETTURE,
+        valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: [valori] },
+      });
+    }
+
     res.json({
       ok: true,
-      messaggio: item.stato === 'applicato'
-        ? 'Annullamento inviato: il PC ripristinerà il programma ordinario.'
-        : 'Annullamento inviato al PC.',
+      id: valori[0],
+      aggiornata: idxEsistente > 0,
+      precedente,
+      consumo,
+      stringa,
+      calo: (precedente !== null && val < precedente),
     });
-  });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
 
-  router.use('/', web);
+/**
+ * GET /rigenera-stringhe?mese=2026-07
+ * Ricalcola la colonna R per tutte le letture di un mese usando la data di
+ * campagna configurata adesso. Serve solo se DATA_CAMPAGNA viene cambiata
+ * dopo che le letture sono già state raccolte: senza questo, le stringhe
+ * resterebbero con la data vecchia.
+ */
+app.get('/rigenera-stringhe', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const cfg    = await configLetture(sheets);
+    const mese   = (req.query.mese || cfg.oggi.slice(0, 7)).toString().trim();
+    if (!/^\d{4}-\d{2}$/.test(mese)) return res.json({ ok: false, errore: 'mese non valido (AAAA-MM)' });
 
-  app.use('/orari', router);
-  console.log(`[orari] modulo Orari Coster ${enabled ? 'attivo' : 'DISATTIVATO'} su /orari`);
-};
+    // La data di campagna del mese richiesto può non essere quella corrente
+    let dataCampagna = cfg.dataCampagna;
+    if (mese !== cfg.oggi.slice(0, 7)) {
+      const rows = await leggi(sheets, SH.CONFIG).catch(() => []);
+      const riga = rows.slice(1).find(r =>
+        (r[0] || '').toString().trim().toUpperCase() === 'DATA_CAMPAGNA_' + mese);
+      if (riga && riga[1]) dataCampagna = riga[1].toString().trim();
+      else return res.json({ ok: false, errore: 'DATA_CAMPAGNA_' + mese + ' non presente nel foglio Config' });
+    }
+
+    const rLet = await leggi(sheets, SH.LETTURE).catch(() => []);
+    const dati = [];
+    rLet.forEach((r, i) => {
+      if (i === 0) return;
+      if ((r[12] || '').toString().trim() !== mese) return;
+      dati.push({
+        riga: i + 1,
+        stringa: costruisciStringa(
+          (r[4] || '').toString().trim(),
+          (r[5] || '').toString().trim(),
+          (r[6] || '').toString().trim(),
+          dataCampagna,
+          numLettura(r[8])
+        ),
+      });
+    });
+
+    if (!dati.length) return res.json({ ok: true, mese, dataCampagna, rigenerate: 0 });
+
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SHEET_ID,
+      requestBody: {
+        valueInputOption: 'RAW',
+        data: dati.map(d => ({ range: `${SH.LETTURE}!R${d.riga}`, values: [[d.stringa]] })),
+      },
+    });
+
+    res.json({
+      ok: true, mese, dataCampagna,
+      rigenerate: dati.length,
+      esempi: dati.slice(0, 5).map(d => d.stringa),
+    });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+app.listen(PORT, () => console.log(`Siram Proxy attivo sulla porta ${PORT}`));
