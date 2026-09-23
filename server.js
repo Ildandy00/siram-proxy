@@ -975,6 +975,13 @@ app.get('/scadenze-rcee', async (req, res) => {
 //  La stringa di importazione nasce insieme alla riga:
 //   CODICE_IT ; COD_ELEM ; FASCIA ; ; AAAAMMGG ; ; ; LETTURA ;
 //   es. IT045643Y;5;;;20260724;;;6989;   (decimali con la virgola)
+//
+//  Data AAAAMMGG nella stringa (regola dal 23/09/2026):
+//   1. DATA_CAMPAGNA_<mese> nel foglio Config, se presente (data unica
+//      per tutte le righe del mese, quando il committente la impone);
+//   2. altrimenti la data effettiva della lettura (colonna B DataOra).
+//  Mai piu' "ultimo giorno della finestra": dava date nel futuro
+//  (es. 20260924 per una lettura fatta il 23/09).
 //  Contatore non letto = nessuna riga = nessuna stringa: l'assenza viene
 //  segnalata come anomalia dal gestionale, invece di passare inosservata
 //  come farebbe una lettura vecchia ridatata.
@@ -982,7 +989,7 @@ app.get('/scadenze-rcee', async (req, res) => {
 //  Foglio "Config": A=Chiave | B=Valore
 //   GIORNI_LETTURA           default, es. "19,20,21,22,23,24"
 //   GIORNI_LETTURA_2026-08   override del singolo mese (vince sul default)
-//   DATA_CAMPAGNA_2026-08    data che finisce nella stringa di importazione
+//   DATA_CAMPAGNA_2026-08    data unica forzata nella stringa (facoltativa)
 //   LETTURE_SEMPRE_APERTE    "SI" per disattivare il blocco sui giorni
 //
 //  I giorni cambiano di mese in mese: si aggiunge la riga del mese quando
@@ -1023,15 +1030,30 @@ function valoreStringa(v) {
   return String(n).replace('.', ',');
 }
 
+// Normalizza una data in 'yyyy-MM-dd'. Accetta 'yyyy-MM-dd',
+// 'dd/MM/yyyy', 'dd/MM/yyyy, HH:mm' e 'yyyymmdd'. Stringa vuota se non valida.
+function normData(v) {
+  if (v === null || v === undefined) return '';
+  const s = v.toString().trim();
+  if (!s) return '';
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return m[1] + '-' + m[2].padStart(2, '0') + '-' + m[3].padStart(2, '0');
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) return m[3] + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0');
+  m = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (m) return m[1] + '-' + m[2] + '-' + m[3];
+  return '';
+}
+
 /**
  * Stringa di importazione, stesso tracciato della formula nel file importazioni:
  *   =CONCATENA(N;O;P;Q;R;S;V;U;T;W;X;Y)
  *   CODICE_IT ; COD_ELEM ; FASCIA ; ; AAAAMMGG ; ; ; LETTURA ;
- * dataCampagna arriva come 'yyyy-MM-dd' ed e' UGUALE per tutte le righe del
- * mese: non e' la data in cui l'operaio ha letto.
+ * dataStringa: DATA_CAMPAGNA del mese se configurata, altrimenti la data
+ * effettiva della lettura. Vuota = oggi (momento del salvataggio).
  */
-function costruisciStringa(codiceIT, codElem, fascia, dataCampagna, valore) {
-  const aaaammgg = (dataCampagna || oggiItalia()).replace(/-/g, '');
+function costruisciStringa(codiceIT, codElem, fascia, dataStringa, valore) {
+  const aaaammgg = (normData(dataStringa) || oggiItalia()).replace(/-/g, '');
   return [
     codiceIT || '',
     codElem || '',
@@ -1123,7 +1145,8 @@ async function configLetture(sheets) {
         }
       } else if (k.indexOf('DATA_CAMPAGNA_') === 0) {
         const m = k.slice('DATA_CAMPAGNA_'.length);
-        if (/^\d{4}-\d{2}$/.test(m)) campagne[m] = v;
+        const d = normData(v);
+        if (/^\d{4}-\d{2}$/.test(m) && d) campagne[m] = d;
       }
     });
   } catch (e) {
@@ -1153,13 +1176,10 @@ async function configLetture(sheets) {
     if (gp.length) prossimaFinestra = String(gp[0]).padStart(2, '0') + '/' + mp.slice(5, 7);
   }
 
-  // Data di campagna del mese: se non configurata, l'ultimo giorno della finestra
-  let dataCampagna = campagne[meseOggi] || '';
-  let fonteData    = dataCampagna ? ('DATA_CAMPAGNA_' + meseOggi) : '';
-  if (!dataCampagna && giorni.length) {
-    dataCampagna = meseOggi + '-' + String(giorni[giorni.length - 1]).padStart(2, '0');
-    fonteData    = 'ultimo giorno della finestra';
-  }
+  // Data della stringa: DATA_CAMPAGNA del mese se configurata, altrimenti
+  // resta vuota e ogni lettura prende la propria data effettiva.
+  const dataCampagna = campagne[meseOggi] || '';
+  const fonteData    = dataCampagna ? ('DATA_CAMPAGNA_' + meseOggi) : 'data effettiva della lettura';
 
   return {
     giorni,
@@ -1167,6 +1187,7 @@ async function configLetture(sheets) {
     mesiConfigurati: Object.keys(perMese).sort(),
     dataCampagna,
     fonteData,
+    campagne,
     sempreAperte,
     apertoOggi,
     oggi,
@@ -1375,60 +1396,66 @@ app.post('/salva-lettura', async (req, res) => {
 });
 
 /**
- * GET /rigenera-stringhe?mese=2026-07
- * Ricalcola la colonna R per tutte le letture di un mese usando la data di
- * campagna configurata adesso. Serve solo se DATA_CAMPAGNA viene cambiata
- * dopo che le letture sono già state raccolte: senza questo, le stringhe
- * resterebbero con la data vecchia.
+ * GET /rigenera-stringhe?mese=2026-09   (vuoto = mese corrente, "tutti" = tutto lo storico)
+ * Ricalcola la colonna R delle letture con la regola attuale:
+ *   DATA_CAMPAGNA_<mese> se configurata, altrimenti la data effettiva della
+ *   lettura presa dalla colonna B. Scrive solo le celle che cambiano.
  */
 app.get('/rigenera-stringhe', async (req, res) => {
   try {
     const sheets = await getSheets();
     const cfg    = await configLetture(sheets);
-    const mese   = (req.query.mese || cfg.oggi.slice(0, 7)).toString().trim();
-    if (!/^\d{4}-\d{2}$/.test(mese)) return res.json({ ok: false, errore: 'mese non valido (AAAA-MM)' });
-
-    // La data di campagna del mese richiesto può non essere quella corrente
-    let dataCampagna = cfg.dataCampagna;
-    if (mese !== cfg.oggi.slice(0, 7)) {
-      const rows = await leggi(sheets, SH.CONFIG).catch(() => []);
-      const riga = rows.slice(1).find(r =>
-        (r[0] || '').toString().trim().toUpperCase() === 'DATA_CAMPAGNA_' + mese);
-      if (riga && riga[1]) dataCampagna = riga[1].toString().trim();
-      else return res.json({ ok: false, errore: 'DATA_CAMPAGNA_' + mese + ' non presente nel foglio Config' });
+    const q      = (req.query.mese || '').toString().trim().toLowerCase();
+    const tutti  = q === 'tutti';
+    const mese   = tutti ? '' : (q || cfg.oggi.slice(0, 7));
+    if (!tutti && !/^\d{4}-\d{2}$/.test(mese)) {
+      return res.json({ ok: false, errore: 'mese non valido: usa AAAA-MM oppure "tutti"' });
     }
 
     const rLet = await leggi(sheets, SH.LETTURE).catch(() => []);
     const dati = [];
+    let esaminate = 0, senzaData = 0;
+
     rLet.forEach((r, i) => {
       if (i === 0) return;
-      if ((r[12] || '').toString().trim() !== mese) return;
-      dati.push({
-        riga: i + 1,
-        stringa: costruisciStringa(
-          (r[4] || '').toString().trim(),
-          (r[5] || '').toString().trim(),
-          (r[6] || '').toString().trim(),
-          dataCampagna,
-          numLettura(r[8])
-        ),
+      const meseRiga = (r[12] || '').toString().trim();
+      if (!tutti && meseRiga !== mese) return;
+      if (!(r[4] || '').toString().trim()) return;   // riga senza codice IT
+      esaminate++;
+
+      let data = cfg.campagne[meseRiga] || normData(r[1]);
+      if (!data) { senzaData++; data = cfg.oggi; }
+
+      const nuova = costruisciStringa(
+        (r[4] || '').toString().trim(),
+        (r[5] || '').toString().trim(),
+        (r[6] || '').toString().trim(),
+        data,
+        numLettura(r[8])
+      );
+      const vecchia = (r[17] || '').toString().trim();
+      if (nuova !== vecchia) dati.push({ riga: i + 1, vecchia, nuova });
+    });
+
+    if (dati.length) {
+      await sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: {
+          valueInputOption: 'RAW',
+          data: dati.map(d => ({ range: `${SH.LETTURE}!R${d.riga}`, values: [[d.nuova]] })),
+        },
       });
-    });
-
-    if (!dati.length) return res.json({ ok: true, mese, dataCampagna, rigenerate: 0 });
-
-    await sheets.spreadsheets.values.batchUpdate({
-      spreadsheetId: SHEET_ID,
-      requestBody: {
-        valueInputOption: 'RAW',
-        data: dati.map(d => ({ range: `${SH.LETTURE}!R${d.riga}`, values: [[d.stringa]] })),
-      },
-    });
+    }
 
     res.json({
-      ok: true, mese, dataCampagna,
+      ok: true,
+      mese: tutti ? 'tutti' : mese,
+      regola: (!tutti && cfg.campagne[mese]) ? ('DATA_CAMPAGNA_' + mese + ' = ' + cfg.campagne[mese])
+                                             : 'data effettiva della lettura',
+      esaminate,
       rigenerate: dati.length,
-      esempi: dati.slice(0, 5).map(d => d.stringa),
+      senzaData,
+      esempi: dati.slice(0, 5).map(d => d.vecchia + '  ->  ' + d.nuova),
     });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
