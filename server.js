@@ -1326,6 +1326,13 @@ app.post('/salva-lettura', async (req, res) => {
     }
     if (precedente === null) precedente = numLettura(g(riga, C.ultima));
 
+    // Lettura inferiore alla precedente: non si scrive, mai.
+    if (precedente !== null && val < precedente) {
+      return res.json({ ok: false, calo: true, precedente,
+        errore: 'Lettura ' + valoreStringa(val) + ' inferiore alla precedente (' +
+                valoreStringa(precedente) + '): non salvata. Ricontrolla il contatore.' });
+    }
+
     const consumo = (precedente !== null && val >= precedente) ? +(val - precedente).toFixed(3) : '';
     const ora = new Date().toLocaleString('it-IT', {
       day:'2-digit', month:'2-digit', year:'numeric',
