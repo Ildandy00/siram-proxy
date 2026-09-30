@@ -333,7 +333,7 @@ app.post('/crea-intervento', async (req, res) => {
 
       const inContenitore = !operaio || operaio.toString().trim() === '';
       if (inContenitore) {
-        await pushNotifica(sheets, ['Matteo', 'Stefano', 'Michele', 'Ezio'],
+        await pushNotifica(sheets, ['Matteo', 'Stefano', 'Michele', 'Ezio', 'Rajji'],
           '📦 Nuova richiesta nel contenitore',
           `${nomeImp} — ${tipoVisita} · ${dataFmt} · da prendere in carico`);
       } else {
@@ -397,7 +397,7 @@ app.post('/notifica-fmp', async (req, res) => {
     // Se la segnalazione non ha un operaio assegnato (es. impianto senza
     // operaio di default), avvisa tutti e 4 così qualcuno la prende in carico.
     const inContenitore = !operaio || operaio.toString().trim() === '' || operaio.toString().trim() === 'DaAssegnare';
-    const destinatari = inContenitore ? ['Matteo', 'Stefano', 'Michele', 'Ezio'] : [operaio];
+    const destinatari = inContenitore ? ['Matteo', 'Stefano', 'Michele', 'Ezio', 'Rajji'] : [operaio];
     await pushNotifica(sheets, destinatari, '🚨 Nuova segnalazione FMP', `${nome} — ${note.slice(0,80)}`);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
