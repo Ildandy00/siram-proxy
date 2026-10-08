@@ -807,37 +807,85 @@ app.post('/elimina-rdacat', async (req, res) => {
 // ============================================================
 //  REPERIBILITA
 // ============================================================
+// ============================================================
+//  REPERIBILITA'
+//  Foglio Reperibilita: A = Data inizio (lunedi') | B = Operaio | C = Data fine
+//  (C vuota = domenica della stessa settimana). Le colonne A e B restano
+//  quelle lette da FmpMailProcessor.gs, quindi lo script mail non cambia.
+// ============================================================
+function isoGiorno(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function piuGiorni(iso, n) {
+  const d = new Date(iso + 'T12:00:00'); d.setDate(d.getDate() + n); return isoGiorno(d);
+}
+function turniReperibilita(rows) {
+  return rows.slice(1).map((r, i) => {
+    const inizio = normData(r[0]);
+    if (!inizio) return null;
+    return { riga: i + 2, dataInizio: inizio, dataFine: normData(r[2]) || piuGiorni(inizio, 6),
+             operaio: String(r[1] || '').trim() };
+  }).filter(Boolean);
+}
+
 app.get('/reperibile', async (req, res) => {
   try {
     const sheets = await getSheets();
     const rows   = await leggi(sheets, SH.REPERIBILITA).catch(() => []);
-    const oggi   = new Date();
-    const dow    = oggi.getDay() === 0 ? 6 : oggi.getDay() - 1;
-    const lun    = new Date(oggi); lun.setDate(oggi.getDate() - dow); lun.setHours(0,0,0,0);
-    const lunStr = lun.toISOString().slice(0,10);
-    const riga   = rows.slice(1).find(r => { if(!r[0]) return false; try { const d=new Date(r[0]); return d.toISOString().slice(0,10)===lunStr; } catch(e){return false;} });
+    const turni  = turniReperibilita(rows);
+    const oggiIso = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Rome' });
+    const oggi    = new Date(oggiIso + 'T12:00:00');
+    const dow     = oggi.getDay() === 0 ? 6 : oggi.getDay() - 1;
+    const lunIso  = piuGiorni(oggiIso, -dow);
+
     const settimane = [];
-    for (let i=-2; i<=6; i++) {
-      const s = new Date(lun); s.setDate(lun.getDate()+i*7);
-      const sStr = s.toISOString().slice(0,10);
-      const rigaS = rows.slice(1).find(r=>{ try{return new Date(r[0]).toISOString().slice(0,10)===sStr;}catch(e){return false;} });
-      settimane.push({ data:sStr, operaio:rigaS?rigaS[1]:'' });
+    for (let i = -2; i <= 6; i++) {
+      const ini = piuGiorni(lunIso, i * 7), fin = piuGiorni(ini, 6);
+      const t = turni.find(x => x.dataInizio === ini);
+      settimane.push({ dataInizio: ini, dataFine: t ? t.dataFine : fin, data: ini, operaio: t ? t.operaio : '' });
     }
-    res.json({ corrente:{ data:lunStr, operaio:riga?riga[1]:null }, settimane });
+    const att = turni.filter(x => x.dataInizio <= oggiIso && x.dataFine >= oggiIso).pop();
+    res.json({
+      corrente: { dataInizio: lunIso, dataFine: piuGiorni(lunIso, 6), data: lunIso, operaio: att ? att.operaio : null },
+      settimane
+    });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
 
+async function scriviReperibile(dataInizio, dataFine, operaio) {
+  const ini = normData(dataInizio);
+  if (!ini) throw new Error('Data di inizio non valida');
+  const fin = normData(dataFine) || piuGiorni(ini, 6);
+  const sheets = await getSheets();
+  const rows   = await leggi(sheets, SH.REPERIBILITA).catch(() => []);
+  if (!rows.length) {
+    await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: SH.REPERIBILITA + '!A1:C1',
+      valueInputOption: 'RAW', requestBody: { values: [['Data Lunedì', 'Operaio', 'Data fine']] } });
+  }
+  const t = turniReperibilita(rows).find(x => x.dataInizio === ini);
+  if (t) {
+    await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.REPERIBILITA}!A${t.riga}:C${t.riga}`,
+      valueInputOption: 'RAW', requestBody: { values: [[ini, operaio, fin]] } });
+  } else {
+    await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: SH.REPERIBILITA + '!A:C',
+      valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [[ini, operaio, fin]] } });
+  }
+}
+
+// usato da responsabile.html
+app.post('/imposta-reperibile', async (req, res) => {
+  try {
+    const { dataInizio, dataFine, operaio } = req.body;
+    if (!operaio) return res.json({ ok: false, errore: 'Operaio mancante' });
+    await scriviReperibile(dataInizio, dataFine, operaio);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// vecchio formato { data, operaio }
 app.post('/salva-reperibile', async (req, res) => {
   try {
-    const { data, operaio } = req.body;
-    const sheets = await getSheets();
-    const rows   = await leggi(sheets, SH.REPERIBILITA).catch(() => []);
-    const idx    = rows.findIndex((r,i)=>{ if(i===0||!r[0]) return false; try{return new Date(r[0]).toISOString().slice(0,10)===data;}catch(e){return false;} });
-    if (idx > 0) {
-      await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.REPERIBILITA}!A${idx+1}:B${idx+1}`, valueInputOption: 'RAW', requestBody: { values: [[data, operaio]] } });
-    } else {
-      await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: SH.REPERIBILITA, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [[data, operaio]] } });
-    }
+    await scriviReperibile(req.body.data, '', req.body.operaio);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
