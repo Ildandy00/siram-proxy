@@ -24,6 +24,7 @@ const SH = {
   CONTATORI:   'Contatori',
   LETTURE:     'Letture',
   CONFIG:      'Config',
+  NOTEGIORNO:  'NoteGiorno',
 };
 
 const webpush = require('web-push');
@@ -872,6 +873,113 @@ async function getSheetId(sheets, name) {
   if (!sheet) throw new Error('Foglio non trovato: ' + name);
   return sheet.properties.sheetId;
 }
+
+// ============================================================
+//  NOTE DEL GIORNO — appunti del responsabile su una data
+//  Foglio NoteGiorno: ID | Data | Testo | Destinatari | Creato | Letto da
+//  Destinatari vuoto = nota privata del responsabile.
+//  L'app operaio vede solo le note in cui compare tra i destinatari.
+// ============================================================
+const NOTE_COLONNE = ['ID', 'Data', 'Testo', 'Destinatari', 'Creato', 'Letto da'];
+
+async function noteFoglio(sheets) {
+  try { return await leggi(sheets, SH.NOTEGIORNO); }
+  catch (e) {
+    await sheets.spreadsheets.batchUpdate({ spreadsheetId: SHEET_ID,
+      requestBody: { requests: [{ addSheet: { properties: { title: SH.NOTEGIORNO } } }] } });
+    await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: SH.NOTEGIORNO + '!A1',
+      valueInputOption: 'RAW', requestBody: { values: [NOTE_COLONNE] } });
+    return [NOTE_COLONNE];
+  }
+}
+const listaNomi = v => String(v || '').split(',').map(x => x.trim()).filter(Boolean);
+function notaDaRiga(r) {
+  return { id: r[0] || '', data: fmtData(r[1]) || String(r[1] || ''), testo: r[2] || '',
+           destinatari: listaNomi(r[3]), creato: r[4] || '', lettoDa: listaNomi(r[5]) };
+}
+
+// GET /note-giorno                -> tutte (responsabile)
+// GET /note-giorno?operaio=Matteo -> solo le sue, da oggi in avanti
+app.get('/note-giorno', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const rows = await noteFoglio(sheets);
+    let note = rows.slice(1).filter(r => r[0]).map(notaDaRiga);
+    const op = String(req.query.operaio || '').trim();
+    if (op) {
+      const oggi = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Rome' });
+      note = note.filter(n => n.destinatari.indexOf(op) >= 0 && n.data >= oggi);
+    }
+    note.sort((a, b) => a.data.localeCompare(b.data));
+    res.json({ ok: true, note });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// POST /salva-nota-giorno { id?, data, testo, destinatari: [] }
+app.post('/salva-nota-giorno', async (req, res) => {
+  try {
+    const { data, testo } = req.body;
+    const dest = (req.body.destinatari || []).map(String).filter(Boolean);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(data || '') || !String(testo || '').trim())
+      return res.json({ ok: false, errore: 'Data e testo obbligatori' });
+    const sheets = await getSheets();
+    const rows = await noteFoglio(sheets);
+    const ora = new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' });
+    let id = req.body.id, nuovi = dest;
+    const idx = id ? rows.findIndex((r, i) => i > 0 && r[0] === id) : -1;
+    if (idx > 0) {
+      const prima = listaNomi(rows[idx][3]);
+      nuovi = dest.filter(d => prima.indexOf(d) < 0);
+      // testo cambiato: la nota torna "da leggere" per tutti
+      const letti = String(rows[idx][2]) === String(testo) ? (rows[idx][5] || '') : '';
+      await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID,
+        range: `${SH.NOTEGIORNO}!B${idx + 1}:F${idx + 1}`, valueInputOption: 'RAW',
+        requestBody: { values: [[data, testo, dest.join(','), rows[idx][4] || ora, letti]] } });
+      if (!letti) nuovi = dest;
+    } else {
+      id = 'NOTA-' + Math.random().toString(36).substring(2, 10).toUpperCase();
+      await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: SH.NOTEGIORNO,
+        valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: [[id, data, testo, dest.join(','), ora, '']] } });
+    }
+    if (nuovi.length) {
+      const g = data.split('-').reverse().join('/');
+      pushNotifica(sheets, nuovi, '📝 Nota per il ' + g, String(testo).slice(0, 120)).catch(() => {});
+    }
+    res.json({ ok: true, id });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// POST /elimina-nota-giorno { id }
+app.post('/elimina-nota-giorno', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const rows = await noteFoglio(sheets);
+    const idx = rows.findIndex((r, i) => i > 0 && r[0] === req.body.id);
+    if (idx > 0) {
+      await sheets.spreadsheets.batchUpdate({ spreadsheetId: SHEET_ID, requestBody: { requests: [{ deleteDimension: {
+        range: { sheetId: await getSheetId(sheets, SH.NOTEGIORNO), dimension: 'ROWS', startIndex: idx, endIndex: idx + 1 } } }] } });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// POST /nota-letta { id, operaio } — l'operaio chiude il banner
+app.post('/nota-letta', async (req, res) => {
+  try {
+    const { id, operaio } = req.body;
+    const sheets = await getSheets();
+    const rows = await noteFoglio(sheets);
+    const idx = rows.findIndex((r, i) => i > 0 && r[0] === id);
+    if (idx > 0 && operaio) {
+      const letti = listaNomi(rows[idx][5]);
+      if (letti.indexOf(operaio) < 0) letti.push(operaio);
+      await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID,
+        range: `${SH.NOTEGIORNO}!F${idx + 1}`, valueInputOption: 'RAW', requestBody: { values: [[letti.join(',')]] } });
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
 
 // GET /preventivi — stub per compatibilità con client vecchi
 app.get('/preventivi', (req, res) => res.json({ preventivi: [] }));
