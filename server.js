@@ -924,11 +924,11 @@ async function getSheetId(sheets, name) {
 
 // ============================================================
 //  NOTE DEL GIORNO — appunti del responsabile su una data
-//  Foglio NoteGiorno: ID | Data | Testo | Destinatari | Creato | Letto da
+//  Foglio NoteGiorno: ID | Data | Testo | Destinatari | Creato | Letto da | Completata
 //  Destinatari vuoto = nota privata del responsabile.
 //  L'app operaio vede solo le note in cui compare tra i destinatari.
 // ============================================================
-const NOTE_COLONNE = ['ID', 'Data', 'Testo', 'Destinatari', 'Creato', 'Letto da'];
+const NOTE_COLONNE = ['ID', 'Data', 'Testo', 'Destinatari', 'Creato', 'Letto da', 'Completata'];
 
 async function noteFoglio(sheets) {
   try { return await leggi(sheets, SH.NOTEGIORNO); }
@@ -943,7 +943,8 @@ async function noteFoglio(sheets) {
 const listaNomi = v => String(v || '').split(',').map(x => x.trim()).filter(Boolean);
 function notaDaRiga(r) {
   return { id: r[0] || '', data: fmtData(r[1]) || String(r[1] || ''), testo: r[2] || '',
-           destinatari: listaNomi(r[3]), creato: r[4] || '', lettoDa: listaNomi(r[5]) };
+           destinatari: listaNomi(r[3]), creato: r[4] || '', lettoDa: listaNomi(r[5]),
+           completata: String(r[6] || '').trim() !== '' };
 }
 
 // GET /note-giorno                -> tutte (responsabile)
@@ -956,7 +957,7 @@ app.get('/note-giorno', async (req, res) => {
     const op = String(req.query.operaio || '').trim();
     if (op) {
       const oggi = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Rome' });
-      note = note.filter(n => n.destinatari.indexOf(op) >= 0 && n.data >= oggi);
+      note = note.filter(n => n.destinatari.indexOf(op) >= 0 && n.data >= oggi && !n.completata);
     }
     note.sort((a, b) => a.data.localeCompare(b.data));
     res.json({ ok: true, note });
@@ -995,6 +996,25 @@ app.post('/salva-nota-giorno', async (req, res) => {
       pushNotifica(sheets, nuovi, '📝 Nota per il ' + g, String(testo).slice(0, 120)).catch(() => {});
     }
     res.json({ ok: true, id });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
+// POST /completa-nota-giorno { id, completata: true|false }
+// Colonna G: data/ora di completamento, vuota = da fare
+app.post('/completa-nota-giorno', async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const rows = await noteFoglio(sheets);
+    const idx = rows.findIndex((r, i) => i > 0 && r[0] === req.body.id);
+    if (idx < 1) return res.json({ ok: false, errore: 'Nota non trovata' });
+    if (rows[0].length < 7) {
+      await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: SH.NOTEGIORNO + '!G1',
+        valueInputOption: 'RAW', requestBody: { values: [['Completata']] } });
+    }
+    const valore = req.body.completata ? new Date().toLocaleString('it-IT', { timeZone: 'Europe/Rome' }) : '';
+    await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.NOTEGIORNO}!G${idx + 1}`,
+      valueInputOption: 'RAW', requestBody: { values: [[valore]] } });
+    res.json({ ok: true, completata: !!valore });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
 
