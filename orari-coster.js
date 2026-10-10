@@ -530,6 +530,12 @@ module.exports = function mountOrariCoster(app) {
     straordinariHash: null,
     straordinariTime: null,
     straOps: new Map(),     // op_id → { op_id, tipo:'crea'|'annulla', ... , creato }
+    // Spegnimenti (programma vacanze delle centraline): stessa logica degli
+    // straordinari — verita' sul PC, qui fotografia + richieste da consegnare.
+    spegnimenti: [],
+    spegnimentiHash: null,
+    spegnimentiTime: null,
+    spegOps: new Map(),     // op_id → { op_id, tipo:'crea'|'annulla'|'fine'|'cancella_estranea'|'riprova', ... }
     // Righe viste davvero su Coster nell'ultima lettura (schedule_id → n).
     // Alcune centraline espongono più righe di quelle previste dalla famiglia.
     righeViste: new Map(),
@@ -707,6 +713,7 @@ module.exports = function mountOrariCoster(app) {
     // Straordinari: conferme, fotografia, richieste pendenti
     for (const opId of Array.isArray(body.ack_ops) ? body.ack_ops : []) {
       state.straOps.delete(String(opId));
+      state.spegOps.delete(String(opId));
     }
     if (Array.isArray(body.straordinari)) {
       state.straordinari = body.straordinari.slice(0, 500);
@@ -716,12 +723,27 @@ module.exports = function mountOrariCoster(app) {
     const needStra = !state.straordinariHash || body.straordinari_hash !== state.straordinariHash;
     const straOps = [...state.straOps.values()].sort((a, b) => a.creato - b.creato).slice(0, 20);
 
+    // Spegnimenti: fotografia e richieste pendenti
+    if (Array.isArray(body.spegnimenti)) {
+      state.spegnimenti = body.spegnimenti.slice(0, 200);
+      state.spegnimentiHash = String(body.spegnimenti_hash || '');
+      state.spegnimentiTime = Date.now();
+    }
+    // agente vecchio (senza spegnimenti): non manda l'hash, non si chiede niente
+    const agentSpeg = body.spegnimenti_hash !== undefined;
+    const needSpeg = agentSpeg && (!state.spegnimentiHash || body.spegnimenti_hash !== state.spegnimentiHash);
+    const spegOps = agentSpeg
+      ? [...state.spegOps.values()].sort((a, b) => a.creato - b.creato).slice(0, 20)
+          .map(({ op_id, tipo, id, dal, al, schedule_ids, note, gruppi, voce, riga }) =>
+            ({ op_id, tipo, id, dal, al, schedule_ids, note, gruppi, voce, riga }))
+      : [];
+
     const next = [...state.jobs.values()]
       .filter((j) => j.stato === 'in_coda')
       .sort((a, b) => a.creato - b.creato)[0];
 
     let job = null;
-    if (next && !needCatalog && !straOps.length) {   // prima si registrano gli straordinari
+    if (next && !needCatalog && !straOps.length && !spegOps.length) {   // prima si registrano straordinari e spegnimenti
       setState(next, 'preso', 'Presa in carico dall\'agente.');
       job = {
         id: next.id,
@@ -736,6 +758,8 @@ module.exports = function mountOrariCoster(app) {
       job,
       need_straordinari: needStra,
       straordinari_ops: straOps,
+      need_spegnimenti: needSpeg,
+      spegnimenti_ops: spegOps,
     });
   });
 
@@ -1080,6 +1104,134 @@ module.exports = function mountOrariCoster(app) {
         ? 'Annullamento inviato: il PC ripristinerà il programma ordinario.'
         : 'Annullamento inviato al PC.',
     });
+  });
+
+  // ---------------- SPEGNIMENTI ----------------
+  // "Spegni tutto" per periodo (Natale, Pasqua, ponti): il PC scrive il
+  // PROGRAMMA VACANZE delle centraline; la centralina riparte da sola il
+  // giorno dopo il giorno finale (compreso).
+
+  const SPEG_MAX_GIORNI = 120;
+  const SPEG_MAX_AVANTI = 300;
+  const SPEG_MAX_PROGRAMMI = 600;
+
+  function oggiRoma() {
+    let v;
+    try { v = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Rome' }); } catch (e) { v = ''; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) v = new Date().toISOString().slice(0, 10);
+    return parseIsoDate(v);
+  }
+
+  function spegAttivoSulSito(id) {
+    return state.spegnimenti.find((x) => x.id === id) || null;
+  }
+
+  web.get('/spegnimenti', (req, res) => {
+    const ops = [...state.spegOps.values()];
+    const pending = ops.filter((o) => o.tipo === 'crea').map((o) => ({
+      id: o.id, dal: o.dal, al: o.al, note: o.note, gruppi: o.gruppi,
+      stato: 'in_attesa_agente', messaggio: 'In attesa che il PC lo registri.',
+      programmi: o.schedule_ids.length, creato: o.creato, voci: [],
+    }));
+    const inInvio = new Map();
+    for (const o of ops) if (o.tipo !== 'crea') inInvio.set(o.id || o.voce, o.tipo);
+    const lista = state.spegnimenti.map((x) => (inInvio.has(x.id) ? { ...x, richiesta_in_invio: inInvio.get(x.id) } : x));
+    res.json({
+      lista: [...pending, ...lista],
+      aggiornato: state.spegnimentiTime,
+      agente_online: Date.now() - state.agent.lastSeen < AGENT_ONLINE_MS,
+      agente_compatibile: state.spegnimentiHash !== null,
+    });
+  });
+
+  web.post('/spegnimenti', (req, res) => {
+    const { data_dal: dalS, data_al: alS, schedule_ids: ids, note, gruppi } = req.body || {};
+    if (!state.catalog) return res.status(503).json({ error: 'Anagrafica non ancora disponibile.' });
+    const d1 = parseIsoDate(dalS);
+    const d2 = parseIsoDate(alS);
+    if (!d1 || !d2) return res.status(400).json({ error: 'Date non valide.' });
+    if (d2 < d1) return res.status(400).json({ error: 'Il giorno finale è prima di quello iniziale.' });
+    const giorni = Math.round((d2 - d1) / 86400000) + 1;
+    if (giorni > SPEG_MAX_GIORNI) return res.status(400).json({ error: `Al massimo ${SPEG_MAX_GIORNI} giorni.` });
+    const oggi = oggiRoma();
+    if (d2 < oggi) return res.status(400).json({ error: 'Il periodo è già passato.' });
+    if (d1 > new Date(oggi.getTime() + SPEG_MAX_AVANTI * 86400000)) {
+      return res.status(400).json({ error: `Inizio oltre ${SPEG_MAX_AVANTI} giorni.` });
+    }
+    if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'Nessun programma scelto.' });
+    if (ids.length > SPEG_MAX_PROGRAMMI) return res.status(400).json({ error: 'Troppi programmi.' });
+    const validi = [];
+    for (const raw of ids) {
+      const sch = findSchedule(raw);
+      if (!sch) return res.status(400).json({ error: `Programma ${raw} non presente in anagrafica.` });
+      if (sch.vacanze === false) return res.status(400).json({ error: `${sch.nome}: centralina senza programma vacanze.` });
+      validi.push(Number.isFinite(Number(sch.id)) ? Number(sch.id) : sch.id);
+    }
+    const now = Date.now();
+    const op = {
+      op_id: `op${newId()}`,
+      tipo: 'crea',
+      id: `sp${newId()}`,
+      dal: isoOf(d1),
+      al: isoOf(d2),
+      schedule_ids: [...new Set(validi)],
+      note: String(note || '').slice(0, 300),
+      gruppi: Array.isArray(gruppi) ? gruppi.slice(0, 10).map((g) => String(g).slice(0, 40)) : [],
+      creato: now,
+      richiesto_da: req.orariIp,
+    };
+    state.spegOps.set(op.op_id, op);
+    console.log(`[orari] spegnimento ${op.id} ${op.dal} → ${op.al}: ${op.schedule_ids.length} programmi`);
+    res.status(201).json({ ok: true, id: op.id });
+  });
+
+  function spegOp(req, res, tipo, extra = {}) {
+    const id = String(req.params.id);
+    if (tipo === 'annulla') {
+      for (const [opId, op] of state.spegOps) {
+        if (op.tipo === 'crea' && op.id === id) {
+          state.spegOps.delete(opId);
+          return res.json({ ok: true, messaggio: 'Annullato prima che il PC lo registrasse.' });
+        }
+      }
+    }
+    if (!spegAttivoSulSito(id)) return res.status(404).json({ error: 'Spegnimento non trovato.' });
+    const opId = `op${newId()}`;
+    state.spegOps.set(opId, { op_id: opId, tipo, id, creato: Date.now(), ...extra });
+    return null;
+  }
+
+  web.post('/spegnimenti/:id/annulla', (req, res) => {
+    if (spegOp(req, res, 'annulla') !== null) return;
+    res.json({ ok: true, messaggio: 'Annullamento inviato: il PC toglie le righe dalle centraline.' });
+  });
+
+  // Riaccendere prima (o allungare): nuovo giorno finale, compreso
+  web.post('/spegnimenti/:id/fine', (req, res) => {
+    const d = parseIsoDate(req.body && req.body.data_al);
+    if (!d) return res.status(400).json({ error: 'Data non valida.' });
+    const sp = spegAttivoSulSito(String(req.params.id));
+    if (sp && parseIsoDate(sp.dal) && Math.round((d - parseIsoDate(sp.dal)) / 86400000) + 1 > SPEG_MAX_GIORNI) {
+      return res.status(400).json({ error: `Al massimo ${SPEG_MAX_GIORNI} giorni.` });
+    }
+    if (spegOp(req, res, 'fine', { al: isoOf(d) }) !== null) return;
+    res.json({ ok: true, messaggio: 'Nuova data inviata: il PC riscrive le righe.' });
+  });
+
+  web.post('/spegnimenti/:id/riprova', (req, res) => {
+    if (spegOp(req, res, 'riprova') !== null) return;
+    res.json({ ok: true, messaggio: 'Nuovo tentativo inviato al PC.' });
+  });
+
+  // Riga del programma vacanze trovata in centralina e non scritta da noi
+  web.post('/spegnimenti/:id/estranea', (req, res) => {
+    const voce = String((req.body && req.body.voce) || '');
+    const riga = Number(req.body && req.body.riga);
+    if (!/^[A-Za-z0-9_-]{6,60}$/.test(voce) || !isIntIn(riga, 0, 19)) {
+      return res.status(400).json({ error: 'Riga non valida.' });
+    }
+    if (spegOp(req, res, 'cancella_estranea', { voce, riga }) !== null) return;
+    res.json({ ok: true, messaggio: 'Cancellazione inviata al PC.' });
   });
 
   router.use('/', web);
