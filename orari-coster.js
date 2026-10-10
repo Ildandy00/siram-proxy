@@ -1234,6 +1234,35 @@ module.exports = function mountOrariCoster(app) {
     res.json({ ok: true, messaggio: 'Cancellazione inviata al PC.' });
   });
 
+  // Toglie dall'elenco uno straordinario chiuso (non scritto, ripristinato,
+  // annullato...): sul PC passa a "archiviato" e non si vede piu'.
+  web.post('/straordinari/:id/archivia', (req, res) => {
+    const id = String(req.params.id);
+    const item = state.straordinari.find((x) => x.id === id);
+    if (!item) return res.status(404).json({ error: 'Straordinario non trovato.' });
+    if (STRA_ACTIVE.has(item.stato)) {
+      return res.status(409).json({ error: 'Ancora attivo: prima annullalo.' });
+    }
+    const opId = `op${newId()}`;
+    state.straOps.set(opId, { op_id: opId, tipo: 'archivia', id, creato: Date.now() });
+    // sparisce subito dalla pagina, senza aspettare la nuova fotografia del PC
+    state.straordinari = state.straordinari.filter((x) => x.id !== id);
+    res.json({ ok: true });
+  });
+
+  web.post('/spegnimenti/:id/archivia', (req, res) => {
+    const id = String(req.params.id);
+    const sp = spegAttivoSulSito(id);
+    if (!sp) return res.status(404).json({ error: 'Spegnimento non trovato.' });
+    if (!['concluso', 'annullato', 'rifiutato'].includes(sp.stato)) {
+      return res.status(409).json({ error: 'Ancora attivo: prima annullalo.' });
+    }
+    const opId = `op${newId()}`;
+    state.spegOps.set(opId, { op_id: opId, tipo: 'archivia', id, creato: Date.now() });
+    state.spegnimenti = state.spegnimenti.filter((x) => x.id !== id);
+    res.json({ ok: true });
+  });
+
   router.use('/', web);
 
   app.use('/orari', router);
