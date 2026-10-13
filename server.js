@@ -235,6 +235,11 @@ app.post('/aggiorna-intervento', async (req, res) => {
     if (collegato) await aggiornaRiga(collegato);
     const inverso = rows.find((r,idx) => idx > 0 && r[10] === id);
     if (inverso && inverso[0] !== id) await aggiornaRiga(inverso[0]);
+    // Pratiche v2: la chiusura dell'operaio chiude la pratica collegata ([PRA:ID] nelle note)
+    try {
+      if (mainRow && stato === 'Chiuso') await pratiche.suInterventoChiuso(sheets, mainRow[6], notaChiusura);
+      if (mainRow && stato === 'Aperto')  await pratiche.suInterventoRiaperto(sheets, mainRow[6]);
+    } catch (e) { console.warn('Pratiche: aggiornamento da intervento non riuscito:', e.message); }
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
@@ -252,55 +257,21 @@ app.post('/aggiungi-extra', async (req, res) => {
 app.get('/dati-responsabile', async (req, res) => {
   try {
     const sheets = await getSheets();
-    const [rImp, rCat, rInt, rChk, rAss, rPrat, rOff] = await Promise.all([
+    const [rImp, rCat, rInt, rChk, rAss] = await Promise.all([
       leggi(sheets, SH.IMPIANTI), leggi(sheets, SH.CATALOGO),
       leggi(sheets, SH.INTERVENTI), leggi(sheets, SH.CHECKLIST),
       leggi(sheets, SH.ASSENZE).catch(() => [[]]),
-      leggi(sheets, SH.PRATICHE).catch(() => [[]]),
-      leggi(sheets, SH.OFFERTE).catch(() => [[]]),
     ]);
     const impianti   = rImp.slice(1).filter(r=>r[0]).map(r=>({ codice:r[0]||'', descrizione:r[1]||'', comune:r[2]||'', indirizzo:r[3]||'', operaioDefault:r[4]||'' }));
     const catalogo   = rCat.slice(1).filter(r=>r[0]).map(r=>({ codiceImpianto:r[0]||'', tipoVisita:r[1]||'', attivita:r[2]||'', ordine:Number(r[3])||0, obbligatoria:r[4]||'SI' }));
     const interventi = rInt.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', codiceImpianto:r[1]||'', dataPrevista:fmtData(r[2]), operaio:r[3]||'', tipoVisita:r[4]||'', stato:r[5]||'', note:r[6]||'', dataChiusura:fmtData(r[7]), creatoIl:fmtData(r[8]), secondoOperaio:r[9]||'', interventoCollegato:r[10]||'', linkDrive:r[11]||'', dataFine:fmtData(r[12]), operaioSecondario2:r[13]||'', notaChiusura:r[14]||'', noteResponsabile:r[15]||'' }));
     const checklist  = rChk.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', idIntervento:r[1]||'', attivita:r[2]||'', eseguita:r[3]||'NO', oraCompletamento:fmtDateTime(r[4]), note:r[5]||'', extra:r[6]||'NO' }));
     const assenze    = rAss.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', operaio:r[1]||'', dataInizio:fmtData(r[2]), dataFine:fmtData(r[3]), tipo:r[4]||'', note:r[5]||'' }));
-    // Pratiche — 19 colonne A→S
-    const pratiche = rPrat.slice(1).filter(r=>r[0]).map(r=>({
-      id:               r[0]||'',
-      idIntervento:     r[1]||'',
-      codiceImpianto:   r[2]||'',
-      stato:            r[3]||'Richiesta',
-      dataRichiesta:    fmtData(r[4]),
-      noteRichiesta:    r[5]||'',
-      linkRichiesta:    r[6]||'',
-      dataPreventivo:   fmtData(r[7]),
-      importoPreventivo:r[8]||'',
-      linkPreventivo:   r[9]||'',
-      dataBdo:          fmtData(r[10]),
-      numeroBdo:        r[11]||'',
-      linkBdo:          r[12]||'',
-      dataDdt:          fmtData(r[13]),
-      numeroDdt:        r[14]||'',
-      linkDdt:          r[15]||'',
-      dataChiusura:     fmtData(r[16]),
-      noteChiusura:     r[17]||'',
-      creatoIl:         fmtData(r[18]),
-      inGestione:       r[19]==='SI',
-    }));
-    // Offerte — foglio separato
-    // A=ID | B=IDPratica | C=Fornitore | D=Descrizione | E=Importo | F=Data | G=LinkDrive | H=Selezionata | I=Note
-    const offerte = rOff.slice(1).filter(r=>r[0]).map(r=>({
-      id:          r[0]||'',
-      idPratica:   r[1]||'',
-      fornitore:   r[2]||'',
-      descrizione: r[3]||'',
-      importo:     r[4]||'',
-      data:        fmtData(r[5]),
-      linkDrive:   r[6]||'',
-      selezionata: r[7]==='SI',
-      note:        r[8]||'',
-    }));
-    res.json({ impianti, catalogo, interventi, checklist, assenze, pratiche, offerte });
+    // Pratiche v2 — stato calcolato dai dati (vedi pratiche.js)
+    const datiPra = await pratiche.caricaTutto(sheets);
+    const praticheLista = datiPra.pratiche.map(pratiche.pulisci);
+    const offerteLista  = datiPra.offerte.map(pratiche.pulisciOff);
+    res.json({ impianti, catalogo, interventi, checklist, assenze, pratiche: praticheLista, offerte: offerteLista });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
 
@@ -471,289 +442,9 @@ app.post('/elimina-catalogo', async (req, res) => {
 });
 
 // ============================================================
-//  PRATICHE — CRUD COMPLETO
-//  Colonne foglio "Pratiche" (20 colonne, A→T):
-//  A=ID | B=IDIntervento | C=CodiceImpianto | D=Stato |
-//  E=DataRichiesta | F=NoteRichiesta | G=LinkRichiesta |
-//  H=DataPreventivo | I=ImportoPreventivo | J=LinkPreventivo |
-//  K=DataBdo | L=NumeroBdo | M=LinkBdo |
-//  N=DataDdt | O=NumeroDdt | P=LinkDdt |
-//  Q=DataChiusura | R=NoteChiusura | S=CreatoIl | T=InGestione
-//
-//  Stato iter: Richiesta → Offerta → Preventivo → BdO → DDT → Chiusa
-//  InGestione=SI bypassa il preventivo
-//  Gli interventi di realizzazione sono nel foglio Interventi con
-//  note contenente [PRA:ID] come riferimento alla pratica
-//  Le offerte sono gestite nel foglio separato "Offerte"
+//  PRATICHE v2 — vedi pratiche.js (endpoint /pratiche, /pratica/*, /addon/*)
 // ============================================================
-
-// GET /pratiche
-app.get('/pratiche', async (req, res) => {
-  try {
-    const sheets   = await getSheets();
-    const rows     = await leggi(sheets, SH.PRATICHE).catch(() => []);
-    const pratiche = rows.slice(1).filter(r=>r[0]).map(r=>({
-      id:               r[0]||'',
-      idIntervento:     r[1]||'',
-      codiceImpianto:   r[2]||'',
-      stato:            r[3]||'Richiesta',
-      dataRichiesta:    fmtData(r[4]),
-      noteRichiesta:    r[5]||'',
-      linkRichiesta:    r[6]||'',
-      dataPreventivo:   fmtData(r[7]),
-      importoPreventivo:r[8]||'',
-      linkPreventivo:   r[9]||'',
-      dataBdo:          fmtData(r[10]),
-      numeroBdo:        r[11]||'',
-      linkBdo:          r[12]||'',
-      dataDdt:          fmtData(r[13]),
-      numeroDdt:        r[14]||'',
-      linkDdt:          r[15]||'',
-      dataChiusura:     fmtData(r[16]),
-      noteChiusura:     r[17]||'',
-      creatoIl:         fmtData(r[18]),
-      inGestione:       r[19]==='SI',
-    }));
-    res.json({ pratiche });
-  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
-});
-
-// POST /crea-pratica
-app.post('/crea-pratica', async (req, res) => {
-  try {
-    const { idIntervento, codiceImpianto, noteRichiesta, linkRichiesta } = req.body;
-    if (!codiceImpianto) return res.json({ ok: false, errore: 'codiceImpianto richiesto' });
-    const sheets  = await getSheets();
-    const id      = 'PRA-' + Math.random().toString(36).substring(2,10).toUpperCase();
-    const oggi    = new Date().toLocaleDateString('it-IT');
-    const dataOggi = new Date().toISOString().slice(0,10);
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SHEET_ID, range: SH.PRATICHE,
-      valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
-      requestBody: { values: [[
-        id, idIntervento||'', codiceImpianto, 'Richiesta',
-        dataOggi, noteRichiesta||'', linkRichiesta||'',
-        '', '', '',   // preventivo
-        '', '', '',   // bdo
-        '', '', '',   // ddt
-        '', '',       // chiusura
-        oggi,         // creatoIl
-        'NO',         // inGestione
-      ]] },
-    });
-    res.json({ ok: true, id });
-  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
-});
-
-// POST /aggiorna-pratica
-app.post('/aggiorna-pratica', async (req, res) => {
-  try {
-    const { id, step, dati } = req.body;
-    const sheets = await getSheets();
-    const rows   = await leggi(sheets, SH.PRATICHE);
-    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
-    if (idx < 1) return res.json({ ok: false, errore: 'Pratica non trovata' });
-
-    const STATI = ['Richiesta','Offerta','Preventivo','BdO','DDT','Chiusa'];
-
-    const stepMap = {
-      richiesta:  { range: `${SH.PRATICHE}!E${idx+1}:G${idx+1}`, fields: ['dataRichiesta','noteRichiesta','linkRichiesta'],      statoNew: 'Richiesta' },
-      preventivo: { range: `${SH.PRATICHE}!H${idx+1}:J${idx+1}`, fields: ['dataPreventivo','importoPreventivo','linkPreventivo'], statoNew: 'Preventivo' },
-      bdo:        { range: `${SH.PRATICHE}!K${idx+1}:M${idx+1}`, fields: ['dataBdo','numeroBdo','linkBdo'],                      statoNew: 'BdO' },
-      ddt:        { range: `${SH.PRATICHE}!N${idx+1}:P${idx+1}`, fields: ['dataDdt','numeroDdt','linkDdt'],                      statoNew: 'DDT' },
-      chiuso:     { range: `${SH.PRATICHE}!Q${idx+1}:R${idx+1}`, fields: ['dataChiusura','noteChiusura'],                        statoNew: 'Chiusa' },
-    };
-
-    const s = stepMap[step];
-    if (!s) return res.json({ ok: false, errore: 'Step non valido' });
-
-    const values = s.fields.map((f,fi) => dati[f] !== undefined ? dati[f] : (rows[idx][7+fi] || ''));
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID, range: s.range,
-      valueInputOption: 'RAW', requestBody: { values: [values] },
-    });
-
-    // Avanza stato solo in avanti
-    const statoAttuale = rows[idx][3] || 'Richiesta';
-    const idxAtt = STATI.indexOf(statoAttuale);
-    const idxNuo = STATI.indexOf(s.statoNew);
-    if (idxNuo > idxAtt) {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID, range: `${SH.PRATICHE}!D${idx+1}`,
-        valueInputOption: 'RAW', requestBody: { values: [[s.statoNew]] },
-      });
-    }
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
-});
-
-// POST /avanza-stato-offerta — porta pratica in stato "Offerta" quando si aggiunge la prima offerta
-app.post('/avanza-stato-offerta', async (req, res) => {
-  try {
-    const { id } = req.body;
-    const sheets = await getSheets();
-    const rows   = await leggi(sheets, SH.PRATICHE);
-    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
-    if (idx < 1) return res.json({ ok: false, errore: 'Pratica non trovata' });
-    const STATI = ['Richiesta','Offerta','Preventivo','BdO','DDT','Chiusa'];
-    const statoAtt = rows[idx][3] || 'Richiesta';
-    if (STATI.indexOf(statoAtt) < STATI.indexOf('Offerta')) {
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID, range: `${SH.PRATICHE}!D${idx+1}`,
-        valueInputOption: 'RAW', requestBody: { values: [['Offerta']] },
-      });
-    }
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
-});
-
-// POST /imposta-gestione — segna pratica come "in gestione" e avanza a BdO
-app.post('/imposta-gestione', async (req, res) => {
-  try {
-    const { id, valore } = req.body; // valore: true/false
-    const sheets = await getSheets();
-    const rows   = await leggi(sheets, SH.PRATICHE);
-    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
-    if (idx < 1) return res.json({ ok: false, errore: 'Pratica non trovata' });
-    // Salva flag in colonna T (indice 19)
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID, range: `${SH.PRATICHE}!T${idx+1}`,
-      valueInputOption: 'RAW', requestBody: { values: [[valore ? 'SI' : 'NO']] },
-    });
-    // Se attivato, avanza stato a BdO (salta Preventivo)
-    if (valore) {
-      const STATI = ['Richiesta','Offerta','Preventivo','BdO','DDT','Chiusa'];
-      const statoAtt = rows[idx][3] || 'Richiesta';
-      if (STATI.indexOf(statoAtt) < STATI.indexOf('BdO')) {
-        await sheets.spreadsheets.values.update({
-          spreadsheetId: SHEET_ID, range: `${SH.PRATICHE}!D${idx+1}`,
-          valueInputOption: 'RAW', requestBody: { values: [['BdO']] },
-        });
-      }
-    }
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
-});
-
-// POST /elimina-pratica
-app.post('/elimina-pratica', async (req, res) => {
-  try {
-    const { id } = req.body;
-    const sheets = await getSheets();
-    const rows   = await leggi(sheets, SH.PRATICHE);
-    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
-    if (idx > 0) {
-      await sheets.spreadsheets.batchUpdate({
-        spreadsheetId: SHEET_ID,
-        requestBody: { requests: [{ deleteDimension: { range: { sheetId: await getSheetId(sheets, SH.PRATICHE), dimension:'ROWS', startIndex:idx, endIndex:idx+1 } } }] },
-      });
-    }
-    // Elimina anche le offerte collegate
-    const rOff = await leggi(sheets, SH.OFFERTE).catch(() => []);
-    const idxOff = rOff.map((r,i)=>i).filter(i=>i>0&&rOff[i][1]===id).reverse();
-    for (const io of idxOff) {
-      await sheets.spreadsheets.batchUpdate({
-        spreadsheetId: SHEET_ID,
-        requestBody: { requests: [{ deleteDimension: { range: { sheetId: await getSheetId(sheets, SH.OFFERTE), dimension:'ROWS', startIndex:io, endIndex:io+1 } } }] },
-      });
-    }
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
-});
-
-// ============================================================
-//  OFFERTE — foglio separato
-//  Colonne: A=ID | B=IDPratica | C=Fornitore | D=Descrizione |
-//           E=Importo | F=Data | G=LinkDrive | H=Selezionata | I=Note
-// ============================================================
-
-// GET /offerte?idPratica=PRA-XXX
-app.get('/offerte', async (req, res) => {
-  try {
-    const { idPratica } = req.query;
-    const sheets = await getSheets();
-    const rows   = await leggi(sheets, SH.OFFERTE).catch(() => []);
-    const offerte = rows.slice(1).filter(r=>r[0]&&(!idPratica||r[1]===idPratica)).map(r=>({
-      id:          r[0]||'',
-      idPratica:   r[1]||'',
-      fornitore:   r[2]||'',
-      descrizione: r[3]||'',
-      importo:     r[4]||'',
-      data:        fmtData(r[5]),
-      linkDrive:   r[6]||'',
-      selezionata: r[7]==='SI',
-      note:        r[8]||'',
-    }));
-    res.json({ offerte });
-  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
-});
-
-// POST /crea-offerta
-app.post('/crea-offerta', async (req, res) => {
-  try {
-    const { idPratica, fornitore, descrizione, importo, data, linkDrive, note } = req.body;
-    if (!idPratica || !fornitore) return res.json({ ok: false, errore: 'idPratica e fornitore richiesti' });
-    const sheets = await getSheets();
-    const id     = 'OFF-' + Math.random().toString(36).substring(2,10).toUpperCase();
-    const oggi   = data || new Date().toISOString().slice(0,10);
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SHEET_ID, range: SH.OFFERTE,
-      valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS',
-      requestBody: { values: [[id, idPratica, fornitore, descrizione||'', importo||'', oggi, linkDrive||'', 'NO', note||'']] },
-    });
-    // Porta pratica in stato Offerta se era ancora in Richiesta
-    const rows = await leggi(sheets, SH.PRATICHE);
-    const idx  = rows.findIndex((r,i) => i > 0 && r[0] === idPratica);
-    if (idx > 0) {
-      const STATI = ['Richiesta','Offerta','Preventivo','BdO','DDT','Chiusa'];
-      const statoAtt = rows[idx][3] || 'Richiesta';
-      if (STATI.indexOf(statoAtt) < STATI.indexOf('Offerta')) {
-        await sheets.spreadsheets.values.update({
-          spreadsheetId: SHEET_ID, range: `${SH.PRATICHE}!D${idx+1}`,
-          valueInputOption: 'RAW', requestBody: { values: [['Offerta']] },
-        });
-      }
-    }
-    res.json({ ok: true, id });
-  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
-});
-
-// POST /seleziona-offerta — seleziona o deseleziona un'offerta
-// id: ID offerta da selezionare, oppure null per deselezionare tutte
-app.post('/seleziona-offerta', async (req, res) => {
-  try {
-    const { id, idPratica } = req.body;
-    const sheets = await getSheets();
-    const rows   = await leggi(sheets, SH.OFFERTE);
-    for (let i = 1; i < rows.length; i++) {
-      if (rows[i][1] === idPratica) {
-        const sel = (id && rows[i][0] === id) ? 'SI' : 'NO';
-        await sheets.spreadsheets.values.update({
-          spreadsheetId: SHEET_ID, range: `${SH.OFFERTE}!H${i+1}`,
-          valueInputOption: 'RAW', requestBody: { values: [[sel]] },
-        });
-      }
-    }
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
-});
-
-// POST /elimina-offerta
-app.post('/elimina-offerta', async (req, res) => {
-  try {
-    const { id } = req.body;
-    const sheets = await getSheets();
-    const rows   = await leggi(sheets, SH.OFFERTE);
-    const idx    = rows.findIndex((r,i) => i > 0 && r[0] === id);
-    if (idx > 0) {
-      await sheets.spreadsheets.batchUpdate({
-        spreadsheetId: SHEET_ID,
-        requestBody: { requests: [{ deleteDimension: { range: { sheetId: await getSheetId(sheets, SH.OFFERTE), dimension:'ROWS', startIndex:idx, endIndex:idx+1 } } }] },
-      });
-    }
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
-});
+const pratiche = require('./pratiche')(app, { getSheets, leggi, SHEET_ID, SH, getSheetId });
 
 // ============================================================
 //  GET /rdacat / POST /crea-rdacat / POST /aggiorna-rdacat / POST /elimina-rdacat
