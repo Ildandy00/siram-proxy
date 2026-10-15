@@ -19,7 +19,8 @@
 //  U=Titolo | V=Ubicazione | W=CartellaDriveId | X=ThreadIds |
 //  Y=ImportoBdo | Z=FornitoreBdo | AA=ConsegnaEntro | AB=NumeroOffertaBdo |
 //  AC=StatoMateriale | AD=NoteMateriale | AE=RichiestoDa | AF=Diario |
-//  AG=DataRichiestaOfferte | AH=NomeImpianto
+//  AG=DataRichiestaOfferte | AH=NomeImpianto | AI=TipoLavoro (Gestione/Extra) | AJ=NumFoto
+//  (O = NumeroDdt)
 //
 //  Foglio "Offerte" (A→L):
 //  A=ID | B=IDPratica | C=Fornitore | D=Descrizione | E=Importo | F=Data |
@@ -39,24 +40,24 @@ const COL_PRATICHE = [
   'dataChiamata', 'problema', 'linkCartella',
   'dataOffertaScelta', 'importoOffertaScelta', 'libJ',
   'dataBdo', 'numeroBdo', 'linkBdo',
-  'dataMateriale', 'libO', 'linkDdt',
+  'dataMateriale', 'numeroDdt', 'linkDdt',
   'dataChiusura', 'noteChiusura', 'creatoIl', 'inGestione',
   'titolo', 'ubicazione', 'cartellaDriveId', 'threadIds',
   'importoBdo', 'fornitoreBdo', 'consegnaEntro', 'numeroOffertaBdo',
   'statoMateriale', 'noteMateriale', 'richiestoDa', 'diario',
-  'dataRichiestaOfferte', 'nomeImpianto',
+  'dataRichiestaOfferte', 'nomeImpianto', 'tipoLavoro', 'numFoto',
 ];
 const HEAD_PRATICHE = [
   'ID', 'IDIntervento', 'CodiceImpianto', 'Stato',
   'DataChiamata', 'Problema', 'LinkCartella',
   'DataOffertaScelta', 'ImportoOffertaScelta', '-',
   'DataBdo', 'NumeroBdo', 'LinkBdo',
-  'DataMateriale', '-', 'LinkDdt',
+  'DataMateriale', 'NumeroDdt', 'LinkDdt',
   'DataChiusura', 'NoteChiusura', 'CreatoIl', 'InGestione',
   'Titolo', 'Ubicazione', 'CartellaDriveId', 'ThreadIds',
   'ImportoBdo', 'FornitoreBdo', 'ConsegnaEntro', 'NumeroOffertaBdo',
   'StatoMateriale', 'NoteMateriale', 'RichiestoDa', 'Diario',
-  'DataRichiestaOfferte', 'NomeImpianto',
+  'DataRichiestaOfferte', 'NomeImpianto', 'TipoLavoro', 'NumFoto',
 ];
 const COL_OFFERTE = ['id', 'idPratica', 'fornitore', 'descrizione', 'importo', 'data', 'linkDrive', 'selezionata', 'note', 'numeroOfferta', 'threadId', 'fileId'];
 const HEAD_OFFERTE = ['ID', 'IDPratica', 'Fornitore', 'Descrizione', 'Importo', 'Data', 'LinkDrive', 'Selezionata', 'Note', 'NumeroOfferta', 'ThreadId', 'FileId'];
@@ -67,7 +68,7 @@ const CAMPI_MODIFICABILI = [
   'dataChiamata', 'linkCartella', 'cartellaDriveId', 'dataRichiestaOfferte',
   'dataBdo', 'numeroBdo', 'linkBdo', 'importoBdo', 'fornitoreBdo', 'consegnaEntro', 'numeroOffertaBdo',
   'statoMateriale', 'dataMateriale', 'noteMateriale', 'linkDdt',
-  'dataChiusura', 'noteChiusura', 'idIntervento',
+  'dataChiusura', 'noteChiusura', 'idIntervento', 'tipoLavoro', 'numeroDdt', 'numFoto',
 ];
 
 const STATI_LEGACY = {
@@ -80,7 +81,7 @@ function colLetter(n) { // 0 → A
   while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); }
   return s;
 }
-const ULTIMA_COL_PRA = colLetter(COL_PRATICHE.length - 1); // AH
+const ULTIMA_COL_PRA = colLetter(COL_PRATICHE.length - 1); // AJ
 const ULTIMA_COL_OFF = colLetter(COL_OFFERTE.length - 1);  // L
 
 function oggiISO() {
@@ -120,14 +121,15 @@ function rigaAPratica(r) {
   p.inGestione = p.inGestione !== 'NO'; // v2: tutte in gestione salvo vecchie marcate NO
   p.threadIds = p.threadIds ? p.threadIds.split(',').map(s => s.trim()).filter(Boolean) : [];
   p.statoSalvato = p.stato;
-  delete p.libJ; delete p.libO;
+  p.tipoLavoro = p.tipoLavoro === 'Extra' ? 'Extra' : 'Gestione';
+  delete p.libJ;
   return p;
 }
 function praticaARiga(p) {
   return COL_PRATICHE.map(c => {
     if (c === 'threadIds') return (p.threadIds || []).join(',');
     if (c === 'inGestione') return p.inGestione === false ? 'NO' : 'SI';
-    if (c === 'libJ' || c === 'libO') return p[c] || '';
+    if (c === 'libJ') return p[c] || '';
     const v = p[c];
     return v === undefined || v === null ? '' : String(v);
   });
@@ -190,7 +192,7 @@ module.exports = function montaPratiche(app, deps) {
     const hp = (rp.data.values && rp.data.values[0]) || [];
     const ho = (ro.data.values && ro.data.values[0]) || [];
     const upd = [];
-    if (hp.length < HEAD_PRATICHE.length || hp[20] !== 'Titolo') upd.push({ range: `${SH.PRATICHE}!A1:${ULTIMA_COL_PRA}1`, values: [HEAD_PRATICHE] });
+    if (hp.length < HEAD_PRATICHE.length || hp[34] !== 'TipoLavoro') upd.push({ range: `${SH.PRATICHE}!A1:${ULTIMA_COL_PRA}1`, values: [HEAD_PRATICHE] });
     if (ho.length < HEAD_OFFERTE.length || ho[9] !== 'NumeroOfferta') upd.push({ range: `${SH.OFFERTE}!A1:${ULTIMA_COL_OFF}1`, values: [HEAD_OFFERTE] });
     if (upd.length) {
       await sheets.spreadsheets.values.batchUpdate({ spreadsheetId: SHEET_ID, requestBody: { valueInputOption: 'RAW', data: upd } });
@@ -255,6 +257,10 @@ module.exports = function montaPratiche(app, deps) {
     const dati = await caricaTutto(sheets);
     const codice = b.codiceImpianto || normK(b.nomeImpianto) || '';
     if (!codice) throw new Error('Impianto mancante');
+    if (b.cartellaDriveId) {
+      const gia = dati.pratiche.find(x => x.cartellaDriveId === b.cartellaDriveId);
+      if (gia) throw new Error(`Cartella già collegata alla pratica "${gia.titolo || gia.id}"`);
+    }
     const id = 'PRA-' + Math.random().toString(36).substring(2, 10).toUpperCase();
     const p = {
       id, idIntervento: b.idIntervento || '', codiceImpianto: codice, stato: 'Chiamata',
@@ -263,6 +269,7 @@ module.exports = function montaPratiche(app, deps) {
       titolo: b.titolo || '', ubicazione: b.ubicazione || '', cartellaDriveId: b.cartellaDriveId || '',
       threadIds: [], richiestoDa: b.richiestoDa || '', nomeImpianto: b.nomeImpianto || '',
       dataRichiestaOfferte: normData(b.dataRichiestaOfferte) || '', diario: '',
+      tipoLavoro: b.tipoLavoro === 'Extra' ? 'Extra' : 'Gestione', numFoto: b.numFoto ? String(b.numFoto) : '',
     };
     aggiungiThread(p, b.threadId);
     aggiungiDiario(p, b.diario || ('Pratica aperta' + (b.origine ? ' da ' + b.origine : '')));
@@ -302,6 +309,7 @@ module.exports = function montaPratiche(app, deps) {
     if (!b.fornitore) throw new Error('Fornitore mancante');
     // stesso numero offerta dallo stesso fornitore → aggiorno invece di duplicare
     let o = b.numeroOfferta ? dati.offerte.find(x => x.idPratica === p.id && x.numeroOfferta && x.numeroOfferta === String(b.numeroOfferta)) : null;
+    if (!o && b.fileId) o = dati.offerte.find(x => x.idPratica === p.id && x.fileId === b.fileId) || null;
     const nuova = !o;
     if (nuova) o = { id: 'OFF-' + Math.random().toString(36).substring(2, 10).toUpperCase(), idPratica: p.id, selezionata: false };
     Object.assign(o, {
@@ -397,8 +405,10 @@ module.exports = function montaPratiche(app, deps) {
     p.statoMateriale = b.statoMateriale || 'Disponibile';
     p.dataMateriale = p.statoMateriale === 'In attesa' ? '' : (normData(b.data) || oggiISO());
     if (b.note !== undefined) p.noteMateriale = b.note;
+    if (b.numeroDdt) p.numeroDdt = String(b.numeroDdt);
+    if (b.linkDdt) p.linkDdt = b.linkDdt;
     aggiungiThread(p, b.threadId);
-    aggiungiDiario(p, `Materiale: ${p.statoMateriale}${b.note ? ' — ' + b.note : ''}`);
+    aggiungiDiario(p, `Materiale: ${p.statoMateriale}${p.numeroDdt ? ' (DDT ' + p.numeroDdt + ')' : ''}${b.note ? ' — ' + b.note : ''}`);
     return salvaERisposta(sheets, dati, p);
   }
 
@@ -420,10 +430,47 @@ module.exports = function montaPratiche(app, deps) {
     return salvaERisposta(sheets, dati, p);
   }
 
+  // Importazione da una cartella Drive già esistente (o completamento di una pratica)
+  // b = { idPratica?, pratica:{...campi crea}, offerte:[...], bdo:{...}|null, ddt:{...}|null }
+  async function azImporta(sheets, b) {
+    let id = b.idPratica;
+    const pr = b.pratica || {};
+    if (!id) {
+      const r = await azCrea(sheets, Object.assign({}, pr, { diario: 'Pratica importata dalla cartella Drive' + (pr.notaImport ? ' — ' + pr.notaImport : '') }));
+      id = r.id;
+    } else {
+      const { dati, p } = await trovaPratica(sheets, id);
+      // completo solo i campi vuoti, non sovrascrivo quello che hai già scritto
+      ['titolo', 'ubicazione', 'problema', 'nomeImpianto', 'cartellaDriveId', 'linkCartella', 'tipoLavoro', 'numFoto', 'dataChiamata'].forEach(k => {
+        if (pr[k] && (!p[k] || (k === 'numFoto'))) p[k] = k === 'dataChiamata' ? normData(pr[k]) : String(pr[k]);
+      });
+      aggiungiDiario(p, 'Completata dai documenti della cartella Drive');
+      await salvaERisposta(sheets, dati, p);
+    }
+    // al completamento salto quello che la pratica ha già (stesso file, stesso BdO, stesso DDT)
+    const giaOff = (await caricaTutto(sheets)).offerte.filter(o => o.idPratica === id);
+    for (const o of (b.offerte || [])) {
+      if (!o.fornitore) continue;
+      if (giaOff.some(x => (o.fileId && x.fileId === o.fileId) || (o.numeroOfferta && x.numeroOfferta === String(o.numeroOfferta)))) continue;
+      await azOfferta(sheets, Object.assign({}, o, { idPratica: id }));
+    }
+    const { p: attuale } = await trovaPratica(sheets, id);
+    if (b.bdo && b.bdo.numeroBdo && !attuale.numeroBdo) {
+      await azBdo(sheets, Object.assign({}, b.bdo, { idPratica: id }));
+    }
+    if (b.ddt && !(attuale.numeroDdt && attuale.numeroDdt === String(b.ddt.numeroDdt || ''))) {
+      await azMateriale(sheets, { idPratica: id, statoMateriale: 'Consegnato', data: b.ddt.data, numeroDdt: b.ddt.numeroDdt, linkDdt: b.ddt.linkDdt, note: b.ddt.note });
+    }
+    const { dati, p } = await trovaPratica(sheets, id);
+    const r = await salvaERisposta(sheets, dati, p);
+    r.id = id;
+    return r;
+  }
+
   const AZIONI = {
     crea: azCrea, aggiorna: azAggiorna, offerta: azOfferta, seleziona: azSeleziona,
     eliminaOfferta: azEliminaOfferta, bdo: azBdo, materiale: azMateriale,
-    collegaThread: azCollegaThread, chiudi: azChiudi,
+    collegaThread: azCollegaThread, chiudi: azChiudi, importa: azImporta,
   };
 
   function rotta(path, az) {
@@ -487,11 +534,12 @@ module.exports = function montaPratiche(app, deps) {
       const praticaThread = daThread || (daOfferta ? d.pratiche.find(p => p.id === daOfferta.idPratica) : null);
       const aperte = d.pratiche.filter(p => p.stato !== 'Chiusa').map(p => ({
         id: p.id, codiceImpianto: p.codiceImpianto, nomeImpianto: p.nomeImpianto, titolo: p.titolo,
-        stato: p.stato, numeroBdo: p.numeroBdo, fornitoreBdo: p.fornitoreBdo, cartellaDriveId: p.cartellaDriveId,
+        stato: p.stato, numeroBdo: p.numeroBdo, fornitoreBdo: p.fornitoreBdo, cartellaDriveId: p.cartellaDriveId, tipoLavoro: p.tipoLavoro,
         offerte: d.offerte.filter(o => o.idPratica === p.id).map(o => ({ id: o.id, fornitore: o.fornitore, numeroOfferta: o.numeroOfferta, importo: o.importo, selezionata: o.selezionata })),
       }));
       const impianti = rImp.slice(1).filter(r => r[0]).map(r => ({ codice: r[0] || '', descrizione: r[1] || '', comune: r[2] || '' }));
-      res.json({ ok: true, stati: STATI, aperte, praticaThread: praticaThread ? pulisci(praticaThread) : null, impianti });
+      const cartelleCollegate = d.pratiche.filter(p => p.cartellaDriveId).map(p => ({ cartella: p.cartellaDriveId, id: p.id, titolo: p.titolo, stato: p.stato }));
+      res.json({ ok: true, stati: STATI, aperte, praticaThread: praticaThread ? pulisci(praticaThread) : null, impianti, cartelleCollegate });
     } catch (err) { console.error('addon/contesto:', err); res.status(500).json({ ok: false, errore: err.message }); }
   });
 

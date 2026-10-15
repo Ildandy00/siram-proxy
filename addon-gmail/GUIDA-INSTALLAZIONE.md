@@ -38,6 +38,20 @@ Unisci la PR `pratiche-v2` del repo **siram-manutenzione** → Cloudflare pubbli
 Se Veolia blocca i componenti aggiuntivi non approvati (messaggio di errore all'installazione), dimmelo:
 il ripiego è una pagina del gestionale dove si incolla il link della mail.
 
+## 4. Pagina "Importa cartella" (stesso progetto Apps Script)
+
+1. Nel progetto **Pratiche Siram** aggiungi due file con **+ → HTML** e **+ → Script**:
+   - `Importa` (HTML) → incolla `Importa.html`
+   - `Importa` (Script) → incolla `Importa.gs`
+2. Sostituisci di nuovo `Codice.gs` e `appsscript.json` con le versioni nuove.
+3. *Esegui il deployment* → **Nuovo deployment** → ⚙️ tipo **App web** →
+   *Esegui come*: **Me** · *Chi ha accesso*: **Solo io** → *Esegui il deployment* → copia l'**URL dell'app web**.
+4. Esegui `provaInstallazione`: deve stampare anche "Cartelle Extra: Lavori IN CORSO" e l'URL della pagina.
+5. Nel gestionale, *Pratiche* → **📥 Importa da cartella**: la prima volta chiede l'URL copiato al punto 3.
+
+Quando modifichi il codice in futuro: *Gestisci deployment* → matita → *Versione: Nuova versione* → *Esegui il deployment*
+(l'URL resta lo stesso).
+
 ## Uso
 
 Apri la mail → icona **Pratiche Siram** → **⚡ Analizza** → controlla → **✅ Conferma**.
@@ -49,6 +63,16 @@ Apri la mail → icona **Pratiche Siram** → **⚡ Analizza** → controlla →
 | Risposta con offerta PDF | salva il PDF come `data_OFFERTA_Fornitore_nome.pdf` e registra fornitore, numero, importo |
 | Buono d'ordine della segreteria | legge numero, data, fornitore, importo, consegna; aggancia la pratica tramite il n. d'offerta |
 | Fornitore: "materiale disponibile" | segna il materiale come disponibile |
+
+**Cartelle già esistenti** (lavori iniziati prima del sistema):
+- dal gestionale **📥 Importa da cartella** o dal pannello Gmail (schermata iniziale) → scegli la cartella dall'elenco
+  (Gestione P2 ed Extra, solo quelle non ancora importate) → il sistema legge buono d'ordine, DDT, offerte e conta le foto →
+  controlli l'anteprima → **Crea pratica**;
+- in Gmail, per un nuovo lavoro, puoi scegliere **Cartella del lavoro → una già esistente** invece di crearne una;
+- su una pratica già collegata a una cartella, **📥 Completa dai documenti** aggiunge ciò che manca.
+
+**Lavori Extra**: nel pannello Gmail scegli *Extra canone*; la cartella nuova nasce in "Lavori IN CORSO" con il nome
+`aaaammggPS_Kxxx_Impianto_Titolo`. Il buono d'ordine con task "Lavori extra canone" viene riconosciuto da solo.
 
 Nel gestionale, dalla pratica, assegni l'intervento: la nota per l'operaio è già compilata con lavoro, ubicazione,
 problema, fornitore e stato del materiale. Quando l'operaio chiude l'intervento, la pratica si chiude da sola.

@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<base target="_top">
+<meta charset="UTF-8">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#1c1c1c; --bg2:#262626; --bg3:#2f2f2f; --bg4:#383838; --border:rgba(255,255,255,.1); --text:#ececec; --muted:#9a9a9a;
+          --yellow:#c8b464; --green:#8fbe7a; --blue:#7ab0d8; --red:#e07a7a; --violet:#c4b5fd; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:'Outfit',system-ui,sans-serif; font-size:14px; }
+  .wrap { max-width:1100px; margin:0 auto; padding:24px 16px 60px; }
+  h1 { font-size:13px; letter-spacing:2px; text-transform:uppercase; color:var(--muted); font-weight:600; margin-bottom:4px; }
+  h2 { font-size:22px; font-weight:700; margin-bottom:18px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  input, select, textarea { background:var(--bg3); border:1px solid var(--border); color:var(--text); border-radius:8px; padding:9px 12px; font:inherit; }
+  input:focus, select:focus, textarea:focus { outline:none; border-color:var(--yellow); }
+  .btn { background:var(--bg4); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 14px; font:inherit; font-weight:600; cursor:pointer; }
+  .btn:hover { border-color:rgba(255,255,255,.25); }
+  .btn.pri { background:var(--yellow); color:#1a1a1a; border-color:var(--yellow); }
+  .btn.sm { padding:5px 10px; font-size:12px; }
+  .btn:disabled { opacity:.5; cursor:default; }
+  .chip { padding:6px 12px; border-radius:8px; border:1px solid var(--border); background:var(--bg2); color:var(--muted); cursor:pointer; font-weight:600; font-size:13px; }
+  .chip.on { border-color:var(--yellow); color:var(--yellow); background:rgba(200,180,100,.1); }
+  .card { background:var(--bg2); border:1px solid var(--border); border-radius:12px; padding:14px 16px; }
+  .lista { margin-top:14px; display:flex; flex-direction:column; gap:6px; }
+  .item { display:flex; gap:12px; align-items:center; padding:10px 14px; background:var(--bg2); border:1px solid var(--border); border-radius:10px; cursor:pointer; }
+  .item:hover { border-color:rgba(255,255,255,.22); }
+  .item .t { font-weight:600; }
+  .item .m { font-size:12px; color:var(--muted); margin-top:2px; }
+  .k { font-family:'DM Mono',monospace; font-size:12px; color:var(--muted); }
+  .tag { font-size:11px; font-weight:700; padding:2px 8px; border-radius:6px; white-space:nowrap; }
+  .tag.Extra { background:rgba(196,181,253,.14); color:var(--violet); }
+  .tag.Gestione { background:rgba(122,176,216,.14); color:var(--blue); }
+  .tag.ok { background:rgba(143,190,122,.14); color:var(--green); }
+  .tag.st { background:rgba(200,180,100,.12); color:var(--yellow); }
+  .muted { color:var(--muted); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px; }
+  label { display:block; font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.4px; margin-bottom:5px; }
+  .fg input, .fg select, .fg textarea { width:100%; }
+  .sez { margin-top:16px; }
+  .sez h3 { font-size:12px; text-transform:uppercase; letter-spacing:.5px; color:var(--muted); margin-bottom:8px; display:flex; gap:8px; align-items:center; }
+  .avv { font-size:13px; padding:8px 12px; background:var(--bg3); border-radius:8px; margin-bottom:6px; }
+  .spin { display:inline-block; width:16px; height:16px; border:2px solid var(--bg4); border-top-color:var(--yellow); border-radius:50%; animation:s .7s linear infinite; vertical-align:middle; margin-right:8px; }
+  @keyframes s { to { transform:rotate(360deg); } }
+  .doc { font-size:12px; display:flex; gap:8px; padding:4px 0; border-bottom:1px solid var(--border); }
+  .doc:last-child { border-bottom:0; }
+  a { color:var(--blue); }
+  .vuoto { padding:30px; text-align:center; color:var(--muted); }
+  .esito { padding:22px; text-align:center; }
+  .esito .big { font-size:20px; font-weight:700; margin-bottom:6px; }
+  .hide { display:none !important; }
+  @media (max-width:640px){ .item { flex-wrap:wrap; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Pratiche Siram</h1>
+  <h2>📥 Importa da una cartella già esistente</h2>
+
+  <!-- ELENCO -->
+  <div id="vElenco">
+    <div class="card">
+      <div class="row" style="margin-bottom:10px">
+        <input id="link" placeholder="Incolla il link di una cartella Drive…" style="flex:1;min-width:260px">
+        <button class="btn pri" onclick="apri(document.getElementById('link').value)">Leggi cartella</button>
+      </div>
+      <div class="row">
+        <span class="chip on" data-f="tutte" onclick="filtro(this)">Tutte</span>
+        <span class="chip" data-f="Gestione" onclick="filtro(this)">Gestione (P2)</span>
+        <span class="chip" data-f="Extra" onclick="filtro(this)">Extra</span>
+        <label style="display:flex;gap:6px;align-items:center;text-transform:none;font-size:13px;margin:0 0 0 6px;color:var(--text);font-weight:500;letter-spacing:0">
+          <input type="checkbox" id="soloLibere" checked onchange="disegna()"> solo non ancora importate</label>
+        <input id="cerca" type="search" placeholder="Cerca K, impianto, lavoro…" oninput="disegna()" style="flex:1;min-width:180px">
+        <button class="btn sm" onclick="carica(true)" title="Rilegge le cartelle da Drive">↻ Aggiorna</button>
+      </div>
+      <div id="info" class="muted" style="font-size:12px;margin-top:8px"></div>
+    </div>
+    <div id="lista" class="lista"><div class="vuoto"><span class="spin"></span>Leggo le cartelle su Drive… la prima volta ci vuole circa mezzo minuto.</div></div>
+  </div>
+
+  <!-- ANTEPRIMA -->
+  <div id="vAnteprima" class="hide">
+    <button class="btn sm" onclick="torna()">← Elenco cartelle</button>
+    <div id="anteprima" style="margin-top:12px"></div>
+  </div>
+</div>
+
+<script>
+const PRATICA_INIZIALE = <?= JSON.stringify(praticaIniziale) ?>;
+const CARTELLA_INIZIALE = <?= JSON.stringify(cartellaIniziale) ?>;
+const GESTIONALE = <?= JSON.stringify(gestionaleUrl) ?>;
+let CARTELLE = [], FILTRO = 'tutte', PREV = null;
+
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function dIT(d){ const m=String(d||'').match(/^(\d{4})-(\d{2})-(\d{2})/); return m?`${m[3]}/${m[2]}/${m[1]}`:(d||''); }
+function run(fn, ...args){ return new Promise((ok,ko)=>google.script.run.withSuccessHandler(ok).withFailureHandler(e=>ko(e))[fn](...args)); }
+
+function filtro(el){ FILTRO=el.dataset.f; document.querySelectorAll('.chip').forEach(c=>c.classList.toggle('on',c===el)); disegna(); }
+
+async function carica(forza){
+  document.getElementById('lista').innerHTML='<div class="vuoto"><span class="spin"></span>'+(forza?'Rileggo tutte le cartelle su Drive…':'Leggo le cartelle…')+'</div>';
+  try {
+    const r = await run('elencoCartelleImport', !!forza);
+    CARTELLE = r.cartelle;
+    const nLib = CARTELLE.filter(c=>!c.collegata).length;
+    document.getElementById('info').innerHTML = `${CARTELLE.length} cartelle · ${nLib} non ancora importate · lette alle ${esc(r.aggiornato)}`+
+      (r.erroreServer?` · <span style="color:var(--red)">⚠️ ${esc(r.erroreServer)}</span>`:'');
+    disegna();
+  } catch(e){ document.getElementById('lista').innerHTML='<div class="vuoto" style="color:var(--red)">⚠️ '+esc(e.message||e)+'</div>'; }
+}
+
+function disegna(){
+  const q=(document.getElementById('cerca').value||'').toLowerCase();
+  const libere=document.getElementById('soloLibere').checked;
+  const l=CARTELLE.filter(c=>(FILTRO==='tutte'||c.tipo===FILTRO)&&(!libere||!c.collegata)&&(!q||(c.nome+' '+c.k).toLowerCase().includes(q)));
+  const el=document.getElementById('lista');
+  if(!l.length){ el.innerHTML='<div class="vuoto">Nessuna cartella</div>'; return; }
+  el.innerHTML=l.slice(0,300).map(c=>`
+    <div class="item" onclick="apri('${c.id}')">
+      <span class="tag ${c.tipo}">${c.tipo==='Extra'?'Extra':'P2'}</span>
+      <div style="flex:1;min-width:0">
+        <div class="t">${esc(c.titolo||c.nome)}</div>
+        <div class="m"><span class="k">${esc(c.k||'K?')}</span> · ${esc(c.impianto||'')}${c.data?' · '+dIT(c.data):''}</div>
+      </div>
+      ${c.stato?`<span class="tag st">${esc(c.stato)}</span>`:''}
+      ${c.collegata?`<span class="tag ok">✓ ${esc(c.collegata.stato||'importata')}</span>`:''}
+    </div>`).join('');
+}
+
+function torna(){ document.getElementById('vAnteprima').classList.add('hide'); document.getElementById('vElenco').classList.remove('hide'); if(!CARTELLE.length) carica(false); else disegna(); }
+
+async function apri(idOLink){
+  if(!idOLink) return;
+  document.getElementById('vElenco').classList.add('hide');
+  document.getElementById('vAnteprima').classList.remove('hide');
+  const box=document.getElementById('anteprima');
+  box.innerHTML='<div class="card vuoto"><span class="spin"></span>Leggo i documenti della cartella (buono d\'ordine, DDT, offerte)… 10-40 secondi.</div>';
+  try { PREV = await run('analizzaCartellaImport', idOLink); mostra(); }
+  catch(e){ box.innerHTML='<div class="card vuoto" style="color:var(--red)">⚠️ '+esc(e.message||e)+'</div>'; }
+}
+
+function campo(path,lab,val,tipo){ return `<div class="fg"><label>${lab}</label><input ${tipo?`type="${tipo}"`:''} data-p="${path}" value="${esc(val)}"></div>`; }
+
+function mostra(){
+  const p=PREV, box=document.getElementById('anteprima');
+  const praticaDest = p.collegata ? p.collegata.id : (PRATICA_INIZIALE||'');
+  box.innerHTML=`
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <div><div style="font-size:17px;font-weight:700">${esc(p.cartella.nome)}</div>
+        <div class="muted" style="font-size:12px;margin-top:3px"><a href="${esc(p.cartella.url)}" target="_blank">📁 Apri la cartella</a> · ${p.documenti.length} documenti · ${p.numFoto} foto</div></div>
+      ${p.collegata?`<span class="tag ok">Già collegata a: ${esc(p.collegata.titolo)}</span>`:''}
+    </div>
+    ${p.avvisi.length?`<div class="sez">${p.avvisi.map(a=>`<div class="avv">${esc(a)}</div>`).join('')}</div>`:''}
+
+    <div class="sez"><h3>Pratica</h3>
+      <div class="grid">
+        <div class="fg"><label>Tipo lavoro</label><select data-p="tipoLavoro"><option ${p.tipoLavoro==='Gestione'?'selected':''}>Gestione</option><option ${p.tipoLavoro==='Extra'?'selected':''}>Extra</option></select></div>
+        ${campo('codiceImpianto','Codice impianto',p.codiceImpianto)}
+        ${campo('nomeImpianto','Impianto',p.nomeImpianto)}
+        ${campo('dataChiamata','Data apertura',p.dataChiamata,'date')}
+      </div>
+      <div class="grid" style="margin-top:10px">
+        <div class="fg" style="grid-column:span 2"><label>Titolo lavoro *</label><input data-p="titolo" value="${esc(p.titolo)}"></div>
+        ${campo('ubicazione','Ubicazione',p.ubicazione||'')}
+      </div>
+      <div class="fg" style="margin-top:10px"><label>Problema / note</label><textarea data-p="problema" rows="2" style="width:100%">${esc(p.problema||(p.statoCartella?'Stato indicato nella cartella: '+p.statoCartella:''))}</textarea></div>
+    </div>
+
+    <div class="sez"><h3>🏷️ Offerte <span class="muted" style="text-transform:none;letter-spacing:0">(${p.offerte.length})</span></h3>
+      ${p.offerte.length?p.offerte.map((o,i)=>`
+        <div class="card" style="background:var(--bg3);margin-bottom:8px">
+          <div class="muted" style="font-size:12px;margin-bottom:8px">📄 <a href="${esc(o.linkDrive)}" target="_blank">${esc(o.file)}</a>
+            <label style="display:inline-flex;gap:5px;margin-left:10px;text-transform:none;font-weight:500;letter-spacing:0"><input type="checkbox" data-p="offerte.${i}.escludi"> non importare</label></div>
+          <div class="grid">${campo(`offerte.${i}.fornitore`,'Fornitore *',o.fornitore)}${campo(`offerte.${i}.numeroOfferta`,'N. offerta',o.numeroOfferta)}${campo(`offerte.${i}.importo`,'Importo €',o.importo)}${campo(`offerte.${i}.data`,'Data',o.data,'date')}</div>
+          <div style="margin-top:8px">${campo(`offerte.${i}.descrizione`,'Oggetto',o.descrizione)}</div>
+        </div>`).join(''):'<div class="muted" style="font-size:13px">Nessuna offerta trovata.</div>'}
+    </div>
+
+    <div class="sez"><h3>📋 Buono d'ordine</h3>
+      ${p.bdo?`<div class="card" style="background:var(--bg3)">
+          <div class="muted" style="font-size:12px;margin-bottom:8px">📄 <a href="${esc(p.bdo.linkBdo)}" target="_blank">${esc(p.bdo.file)}</a>
+            <label style="display:inline-flex;gap:5px;margin-left:10px;text-transform:none;font-weight:500;letter-spacing:0"><input type="checkbox" data-p="bdo.escludi"> non importare</label></div>
+          <div class="grid">${campo('bdo.numeroBdo','N. ordine',p.bdo.numeroBdo)}${campo('bdo.dataBdo','Data',p.bdo.dataBdo,'date')}${campo('bdo.fornitoreBdo','Fornitore',p.bdo.fornitoreBdo)}${campo('bdo.importoBdo','Totale € IVA escl.',p.bdo.importoBdo)}${campo('bdo.numeroOfferta','Offerta citata',p.bdo.numeroOfferta)}${campo('bdo.consegnaEntro','Consegna entro',p.bdo.consegnaEntro,'date')}</div>
+        </div>`:'<div class="muted" style="font-size:13px">Nessun buono d\'ordine trovato.</div>'}
+    </div>
+
+    <div class="sez"><h3>🚚 DDT — materiale consegnato</h3>
+      ${p.ddt?`<div class="card" style="background:var(--bg3)">
+          <div class="muted" style="font-size:12px;margin-bottom:8px">📄 <a href="${esc(p.ddt.linkDdt)}" target="_blank">${esc(p.ddt.file)}</a>
+            <label style="display:inline-flex;gap:5px;margin-left:10px;text-transform:none;font-weight:500;letter-spacing:0"><input type="checkbox" data-p="ddt.escludi"> non importare</label></div>
+          <div class="grid">${campo('ddt.numeroDdt','N. DDT',p.ddt.numeroDdt)}${campo('ddt.data','Data',p.ddt.data,'date')}${campo('ddt.note','Note',p.ddt.note)}</div>
+        </div>`:'<div class="muted" style="font-size:13px">Nessun DDT trovato.</div>'}
+    </div>
+
+    ${p.altri.length?`<div class="sez"><h3>Altri documenti (restano solo in cartella)</h3><div class="muted" style="font-size:12px">${p.altri.map(esc).join(' · ')}</div></div>`:''}
+
+    <div class="row" style="margin-top:20px;justify-content:flex-end">
+      <span id="msg" class="muted" style="font-size:13px;flex:1"></span>
+      <button class="btn" onclick="torna()">Annulla</button>
+      <button class="btn pri" id="btnSalva" onclick="salva('${esc(praticaDest)}')">${praticaDest?'Completa la pratica':'Crea pratica'}</button>
+    </div>
+  </div>`;
+}
+
+function leggiCampi(){
+  document.querySelectorAll('#anteprima [data-p]').forEach(el=>{
+    const parti=el.dataset.p.split('.'); let o=PREV;
+    for(let i=0;i<parti.length-1;i++){ o=o[isNaN(parti[i])?parti[i]:Number(parti[i])]; if(!o) return; }
+    o[parti[parti.length-1]] = el.type==='checkbox' ? el.checked : el.value.trim();
+  });
+}
+
+async function salva(idPratica){
+  leggiCampi();
+  const b=document.getElementById('btnSalva'), m=document.getElementById('msg');
+  b.disabled=true; m.innerHTML='<span class="spin"></span>Salvo nel gestionale…';
+  try {
+    const r = await run('salvaImportCartella', PREV, idPratica||'');
+    document.getElementById('anteprima').innerHTML=`<div class="card esito">
+      <div class="big">✅ ${idPratica?'Pratica completata':'Pratica creata'}</div>
+      <div class="muted">${esc(r.titolo)} — stato: <strong style="color:var(--text)">${esc(r.stato)}</strong></div>
+      <div class="row" style="justify-content:center;margin-top:18px">
+        <a class="btn" href="${esc(GESTIONALE)}" target="_blank" style="text-decoration:none">Apri il gestionale</a>
+        <button class="btn pri" onclick="torna();carica(false)">Importa un'altra cartella</button>
+      </div></div>`;
+  } catch(e){ b.disabled=false; m.innerHTML='<span style="color:var(--red)">⚠️ '+esc(e.message||e)+'</span>'; }
+}
+
+if (CARTELLA_INIZIALE) apri(CARTELLA_INIZIALE); else carica(false);
+</script>
+</body>
+</html>

@@ -20,6 +20,10 @@
     "https://siram-proxy.onrender.com/",
     "https://api.anthropic.com/"
   ],
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "MYSELF"
+  },
   "addOns": {
     "common": {
       "name": "Pratiche Siram",
