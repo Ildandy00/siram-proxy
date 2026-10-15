@@ -281,10 +281,14 @@ app.post('/crea-intervento', async (req, res) => {
     const statoIniziale      = req.body.statoOverride || 'Aperto';
     const dataFine           = req.body.dataFine || '';
     const operaioSecondario2 = req.body.operaioSecondario2 || '';
+    // 15/10/2026: attivita' del responsabile — riga gia' chiusa, con secondo operaio, senza notifiche
+    const secondoOperaio     = req.body.secondoOperaio || '';
+    const dataChiusuraIniz   = statoIniziale === 'Chiuso' ? (dataPrevista || '') : '';
+    const silenziosa         = !!req.body.nessunaNotifica || statoIniziale === 'Chiuso';
     const sheets = await getSheets();
     const id   = 'INT-' + Math.random().toString(36).substring(2,10).toUpperCase();
     const oggi = new Date().toLocaleDateString('it-IT');
-    await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: SH.INTERVENTI, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [[id, codiceImpianto, dataPrevista, operaio, tipoVisita, statoIniziale, note||'', '', oggi, '', req.body.interventoCollegato||'', '', dataFine, operaioSecondario2]] } });
+    await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: SH.INTERVENTI, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [[id, codiceImpianto, dataPrevista, operaio, tipoVisita, statoIniziale, note||'', dataChiusuraIniz, oggi, secondoOperaio, req.body.interventoCollegato||'', '', dataFine, operaioSecondario2]] } });
     const rCat = await leggi(sheets, SH.CATALOGO);
     const voci = rCat.slice(1).filter(r=>r[0]===codiceImpianto&&r[1]===tipoVisita).sort((a,b)=>(Number(a[3])||0)-(Number(b[3])||0));
     const chkRows = voci.map(r => { const chkId='CHK-'+Math.random().toString(36).substring(2,10).toUpperCase(); return [chkId, id, r[2]||'', 'NO', '', '', 'NO']; });
@@ -297,7 +301,7 @@ app.post('/crea-intervento', async (req, res) => {
 // ── Notifica push ──
     // Se l'intervento è nel Contenitore (nessun operaio) → avvisa tutti e 4
     // gli operai, così qualcuno lo prende in carico. Altrimenti avvisa il singolo.
-    if (statoIniziale !== 'DaAssegnare') {
+    if (statoIniziale !== 'DaAssegnare' && !silenziosa) {
       const rImp    = await leggi(sheets, SH.IMPIANTI);
       const impRow  = rImp.slice(1).find(r => r[0] === codiceImpianto);
       const nomeImp = impRow ? impRow[1] : codiceImpianto;
