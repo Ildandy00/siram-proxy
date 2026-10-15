@@ -94,6 +94,7 @@ function server_(metodo, path, corpo) {
   let j = null;
   try { j = JSON.parse(r.getContentText()); } catch (e) { /* risposta non JSON */ }
   if (code === 401) throw new Error('Token non valido: controlla ADDON_TOKEN');
+  if (j && j.ok === false && j.errore) throw new Error('Server: ' + j.errore);
   if (code >= 500 || !j) throw new Error('Il server non risponde correttamente (' + code + '). Se è appena ripartito, riprova tra 30 secondi.');
   if (j.ok === false) throw new Error(j.errore || 'Errore dal server');
   return j;

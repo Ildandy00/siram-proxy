@@ -165,8 +165,24 @@ module.exports = function montaPratiche(app, deps) {
   const ADDON_TOKEN = process.env.ADDON_TOKEN || '';
   let intestazioniOk = false;
 
+  // Allarga il foglio se ha meno colonne del necessario (altrimenti Google rifiuta la scrittura)
+  async function assicuraColonne(sheets, nomeFoglio, nCol) {
+    const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID, fields: 'sheets.properties' });
+    const sh = meta.data.sheets.find(x => x.properties.title === nomeFoglio);
+    if (!sh) {
+      await sheets.spreadsheets.batchUpdate({ spreadsheetId: SHEET_ID, requestBody: { requests: [{ addSheet: { properties: { title: nomeFoglio, gridProperties: { columnCount: nCol } } } }] } });
+      return;
+    }
+    const attuali = (sh.properties.gridProperties && sh.properties.gridProperties.columnCount) || 0;
+    if (attuali < nCol) {
+      await sheets.spreadsheets.batchUpdate({ spreadsheetId: SHEET_ID, requestBody: { requests: [{ appendDimension: { sheetId: sh.properties.sheetId, dimension: 'COLUMNS', length: nCol - attuali } }] } });
+    }
+  }
+
   async function assicuraIntestazioni(sheets) {
     if (intestazioniOk) return;
+    await assicuraColonne(sheets, SH.PRATICHE, HEAD_PRATICHE.length);
+    await assicuraColonne(sheets, SH.OFFERTE, HEAD_OFFERTE.length);
     const [rp, ro] = await Promise.all([
       sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${SH.PRATICHE}!A1:${ULTIMA_COL_PRA}1` }).catch(() => ({ data: {} })),
       sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${SH.OFFERTE}!A1:${ULTIMA_COL_OFF}1` }).catch(() => ({ data: {} })),
@@ -476,7 +492,7 @@ module.exports = function montaPratiche(app, deps) {
       }));
       const impianti = rImp.slice(1).filter(r => r[0]).map(r => ({ codice: r[0] || '', descrizione: r[1] || '', comune: r[2] || '' }));
       res.json({ ok: true, stati: STATI, aperte, praticaThread: praticaThread ? pulisci(praticaThread) : null, impianti });
-    } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+    } catch (err) { console.error('addon/contesto:', err); res.status(500).json({ ok: false, errore: err.message }); }
   });
 
   // Unico punto d'ingresso per le azioni dal pannello Gmail
