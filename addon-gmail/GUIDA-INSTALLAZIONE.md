@@ -41,7 +41,7 @@ il ripiego è una pagina del gestionale dove si incolla il link della mail.
 ## 4. Pagina "Importa cartella" (stesso progetto Apps Script)
 
 1. Nel progetto **Pratiche Siram** aggiungi due file con **+ → HTML** e **+ → Script**:
-   - `Importa` (HTML) → incolla `Importa.html`
+   - `Importa2` (HTML) → incolla `Importa2.html`
    - `Importa` (Script) → incolla `Importa.gs`
 2. Sostituisci di nuovo `Codice.gs` e `appsscript.json` con le versioni nuove.
 3. *Esegui il deployment* → **Nuovo deployment** → ⚙️ tipo **App web** →

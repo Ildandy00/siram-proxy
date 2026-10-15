@@ -11,7 +11,7 @@
 //  PAGINA WEB
 // ============================================================
 function doGet(e) {
-  const t = HtmlService.createTemplateFromFile('Importa');
+  const t = HtmlService.createTemplateFromFile('Importa2');
   t.cartellaIniziale = (e && e.parameter && e.parameter.cartella) || '';
   t.praticaIniziale = (e && e.parameter && e.parameter.pratica) || '';
   t.gestionaleUrl = cfg_('GESTIONALE_URL');
