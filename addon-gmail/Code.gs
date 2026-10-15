@@ -14,7 +14,6 @@
  *   CLAUDE_MODEL       claude-haiku-5-5                            (default)
  *   CARTELLA_RADICE_ID 1WLRoEu8ZsjhVzwtZ1rItYy6L0Woi4Vve              (default: LAVORI in P2 — Gestione)
  *   CARTELLA_EXTRA_ID  1vRvjlIMGNsL75596iUenKjCsAeRTF034              (default: Lavori IN CORSO — Extra)
- *   WEBAPP_URL         indirizzo della pagina "Importa cartella" (si ricava da solo se il progetto è pubblicato come app web)
  *   EMAIL_SEGRETERIA   marta.fratini@veolia.com                    (default)
  *   GESTIONALE_URL     https://siram-manutenzione.davide-cori93.workers.dev/responsabile.html
  */
@@ -449,22 +448,19 @@ function onHomepage() {
     .setHeader(CardService.newCardHeader().setTitle('Pratiche Siram').setSubtitle('Lavori in gestione ed Extra'))
     .addSection(CardService.newCardSection()
       .addWidget(CardService.newTextParagraph().setText('Apri una mail (chiamata, offerta, buono d\'ordine, risposta del fornitore) e premi <b>Analizza</b>: il pannello propone pratica e cartella, tu confermi.'))
-      .addWidget(bottoneImporta_('📥 Importa una cartella già esistente', ''))
+      .addWidget(CardService.newTextParagraph().setText('Per una <b>cartella già esistente</b>: selezionala in Google Drive e usa il pannello Pratiche Siram a destra.'))
+      .addWidget(bottoneImporta_('📁 Apri Lavori IN CORSO (Extra)', cfg_('CARTELLA_EXTRA_ID')))
+      .addWidget(bottoneImporta_('📁 Apri LAVORI in P2 (Gestione)', cfg_('CARTELLA_RADICE_ID')))
       .addWidget(CardService.newTextButton().setText('🔄 Aggiorna elenco impianti').setOnClickAction(CardService.newAction().setFunctionName('onAggiornaCartelle')))
       .addWidget(CardService.newTextButton().setText('🔌 Prova connessione').setOnClickAction(CardService.newAction().setFunctionName('onProvaConnessione')))
       .addWidget(CardService.newTextButton().setText('Apri il gestionale').setOpenLink(CardService.newOpenLink().setUrl(cfg_('GESTIONALE_URL')))));
   return card.build();
 }
 
-function bottoneImporta_(testo, query) {
-  const url = urlPaginaImporta_();
-  const b = CardService.newTextButton().setText(testo);
-  if (url) return b.setOpenLink(CardService.newOpenLink().setUrl(url + (query || '')));
-  return b.setOnClickAction(CardService.newAction().setFunctionName('onImportaNonPubblicato'));
-}
-function onImportaNonPubblicato() {
-  return CardService.newActionResponseBuilder().setNotification(CardService.newNotification()
-    .setText("Pagina Importa non pubblicata: in Apps Script fai Esegui il deployment → Nuovo deployment → App web")).build();
+// Le cartelle esistenti si importano dal pannello in Drive: il pulsante apre la cartella (o "Lavori IN CORSO")
+function bottoneImporta_(testo, idCartella) {
+  const id = idCartella || cfg_('CARTELLA_EXTRA_ID');
+  return CardService.newTextButton().setText(testo).setOpenLink(CardService.newOpenLink().setUrl('https://drive.google.com/drive/folders/' + id));
 }
 
 function onGmailMessage(e) {
@@ -738,7 +734,10 @@ function cardFatto_(fatto, cartella, pratica, daCartella) {
   const sez = CardService.newCardSection();
   fatto.forEach(t => sez.addWidget(CardService.newDecoratedText().setText('✓ ' + t).setWrapText(true)));
   // cartella già piena di documenti: propongo di leggerli (offerte, BdO, DDT) e completare la pratica
-  if (daCartella && cartella && pratica) sez.addWidget(bottoneImporta_('📥 Completa la pratica dai documenti della cartella', '?cartella=' + cartella.getId() + '&pratica=' + pratica.id));
+  if (daCartella && cartella && pratica) {
+    sez.addWidget(CardService.newTextParagraph().setText('La cartella ha già dei documenti: aprila in Drive, selezionala e premi <b>Completa dai documenti</b> nel pannello a destra.'));
+    sez.addWidget(bottoneImporta_('📁 Apri la cartella in Drive', cartella.getParents().hasNext() ? cartella.getParents().next().getId() : cartella.getId()));
+  }
   if (cartella) sez.addWidget(CardService.newTextButton().setText('📁 Apri cartella').setOpenLink(CardService.newOpenLink().setUrl(cartella.getUrl())));
   sez.addWidget(CardService.newTextButton().setText('Apri il gestionale').setOpenLink(CardService.newOpenLink().setUrl(cfg_('GESTIONALE_URL'))));
   return CardService.newCardBuilder().setHeader(CardService.newCardHeader().setTitle('Fatto').setSubtitle(pratica ? (pratica.titolo || '') : '')).addSection(sez).build();
@@ -763,5 +762,4 @@ function provaInstallazione() {
   console.log('Server: ' + JSON.stringify(server_('get', '/addon/contesto')).slice(0, 200));
   console.log('Claude: ' + (cfg_('ANTHROPIC_API_KEY') ? 'chiave presente' : 'chiave MANCANTE'));
   console.log('Cartelle Extra: ' + DriveApp.getFolderById(cfg_('CARTELLA_EXTRA_ID')).getName());
-  console.log('Pagina Importa: ' + (urlPaginaImporta_() || 'NON PUBBLICATA (Esegui il deployment → Nuovo deployment → App web)'));
 }

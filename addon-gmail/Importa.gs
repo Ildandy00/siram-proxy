@@ -1,29 +1,9 @@
 /**
- * PRATICHE SIRAM — importazione da una cartella Drive già esistente
+ * PRATICHE SIRAM — lettura di una cartella lavoro già esistente
  * ------------------------------------------------------------
- * Pagina web (stesso progetto del pannello Gmail): elenca le cartelle lavoro
- * di "LAVORI in P2" (Gestione) e "Lavori IN CORSO" (Extra) non ancora collegate
- * a una pratica, legge i documenti (buono d'ordine, DDT, offerte, foto) e crea
- * o completa la pratica nel gestionale.
+ * Usato dal pannello in Drive (Drive.gs): legge nome della cartella, buono d'ordine,
+ * DDT, offerte e foto, e crea o completa la pratica nel gestionale.
  */
-
-// ============================================================
-//  PAGINA WEB
-// ============================================================
-function doGet(e) {
-  const t = HtmlService.createTemplateFromFile('Importa2');
-  t.cartellaIniziale = (e && e.parameter && e.parameter.cartella) || '';
-  t.praticaIniziale = (e && e.parameter && e.parameter.pratica) || '';
-  t.gestionaleUrl = cfg_('GESTIONALE_URL');
-  return t.evaluate()
-    .setTitle('Importa cartella — Pratiche Siram')
-    .addMetaTag('viewport', 'width=device-width, initial-scale=1')
-    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
-}
-
-function urlPaginaImporta_() {
-  return cfg_('WEBAPP_URL') || (function () { try { return ScriptApp.getService().getUrl() || ''; } catch (e) { return ''; } })();
-}
 
 // ============================================================
 //  NOMI DELLE CARTELLE
@@ -66,59 +46,6 @@ function idDaLink_(s) {
 }
 
 // ============================================================
-//  ELENCO CARTELLE (con cache, la scansione di 64 impianti è lenta)
-// ============================================================
-function cacheGrande_(chiave, valore) {
-  const c = CacheService.getUserCache();
-  if (valore === undefined) {
-    const n = Number(c.get(chiave + '_n') || 0);
-    if (!n) return null;
-    const pezzi = c.getAll(Array.from({ length: n }, (_, i) => chiave + '_' + i));
-    try { return JSON.parse(Array.from({ length: n }, (_, i) => pezzi[chiave + '_' + i] || '').join('')); } catch (e) { return null; }
-  }
-  const s = JSON.stringify(valore), dim = 90000, n = Math.ceil(s.length / dim), obj = {};
-  for (let i = 0; i < n; i++) obj[chiave + '_' + i] = s.slice(i * dim, (i + 1) * dim);
-  obj[chiave + '_n'] = String(n);
-  c.putAll(obj, 21600);
-}
-
-function scansionaCartelle_() {
-  const out = [];
-  // Extra: cartelle dirette di "Lavori IN CORSO" (salto quelle che iniziano con "_", es. l'archivio contabilizzati)
-  const itE = DriveApp.getFolderById(cfg_('CARTELLA_EXTRA_ID')).getFolders();
-  while (itE.hasNext()) {
-    const f = itE.next(); const nome = f.getName();
-    if (/^_/.test(nome)) continue;
-    const n = leggiNomeCartella_(nome, '');
-    out.push({ id: f.getId(), nome, tipo: 'Extra', k: n.k, impianto: n.impianto, titolo: n.titolo, stato: n.stato, data: n.data, agg: f.getLastUpdated().getTime() });
-  }
-  // Gestione: sottocartelle delle cartelle impianto di "LAVORI in P2"
-  cartelleImpianti_(true).forEach(ci => {
-    const it = DriveApp.getFolderById(ci.id).getFolders();
-    while (it.hasNext()) {
-      const f = it.next(); const nome = f.getName();
-      const n = leggiNomeCartella_(nome, ci.nome);
-      out.push({ id: f.getId(), nome, tipo: 'Gestione', k: n.k || ci.k, impianto: n.impianto, titolo: n.titolo, stato: n.stato, data: n.data, agg: f.getLastUpdated().getTime() });
-    }
-  });
-  out.sort((a, b) => b.agg - a.agg);
-  return out;
-}
-
-// Chiamata dalla pagina
-function elencoCartelleImport(forza) {
-  let cartelle = forza ? null : cacheGrande_('cartelleLavoro');
-  if (!cartelle) { cartelle = scansionaCartelle_(); cacheGrande_('cartelleLavoro', cartelle); }
-  let collegate = [], erroreServer = '';
-  try { collegate = server_('get', '/addon/contesto').cartelleCollegate || []; }
-  catch (e) { erroreServer = e.message; }
-  const mappa = {};
-  collegate.forEach(c => { mappa[c.cartella] = c; });
-  cartelle.forEach(c => { c.collegata = mappa[c.id] || null; });
-  return { cartelle, erroreServer, aggiornato: Utilities.formatDate(new Date(), 'Europe/Rome', 'dd/MM HH:mm') };
-}
-
-// ============================================================
 //  LETTURA DEI DOCUMENTI
 // ============================================================
 const RE_DOC = {
@@ -144,44 +71,43 @@ function classificaPerNome_(nome) {
   if (RE_DOC.consuntivo.test(nome)) return 'altro';
   return '';
 }
-function classificaPerTesto_(t) {
-  if (/ordine di acquisto/i.test(t) && /veolia/i.test(t)) return 'bdo';
-  if (/documento di trasporto|d\.?d\.?t\.?\s*n|causale del trasporto/i.test(t)) return 'ddt';
-  if (/offerta|preventivo|quotazione/i.test(t)) return 'offerta';
-  return 'altro';
-}
-
-const SCHEMA_OFFERTA = {
+const SCHEMA_DOC = {
   type: 'object',
   properties: {
-    fornitore: { type: 'string', description: "Ragione sociale di chi emette l'offerta (non Veolia/Siram)" },
-    numeroOfferta: { type: 'string' },
-    dataOfferta: { type: 'string', description: 'gg/mm/aaaa' },
+    tipo: { type: 'string', enum: ['offerta', 'ddt', 'bdo', 'altro'], description: "offerta/preventivo di un fornitore; ddt = documento di trasporto; bdo = buono/ordine d'acquisto Veolia; altro" },
+    fornitore: { type: 'string', description: "Ragione sociale del fornitore/mittente (mai Veolia né Siram)" },
+    numero: { type: 'string', description: "Numero dell'offerta, del DDT o dell'ordine" },
+    data: { type: 'string', description: 'Data del documento gg/mm/aaaa' },
     importo: { type: 'string', description: 'Totale imponibile IVA esclusa, formato 1234,56; vuoto se assente' },
-    descrizione: { type: 'string', description: 'Oggetto della fornitura in poche parole' },
+    descrizione: { type: 'string', description: 'Oggetto/merce in poche parole' },
   },
-  required: ['fornitore'],
+  required: ['tipo'],
 };
-const SCHEMA_DDT = {
-  type: 'object',
-  properties: {
-    fornitore: { type: 'string', description: 'Chi ha emesso il DDT (mittente)' },
-    numeroDdt: { type: 'string' },
-    dataDdt: { type: 'string', description: 'gg/mm/aaaa' },
-    descrizione: { type: 'string', description: 'Merce consegnata in poche parole' },
-  },
-};
-
-function datiDocumentoClaude_(tipo, testo, file) {
-  if (!cfg_('ANTHROPIC_API_KEY')) return null;
-  const schema = tipo === 'ddt' ? SCHEMA_DDT : SCHEMA_OFFERTA;
-  const istr = tipo === 'ddt'
-    ? "Questo è un documento di trasporto (DDT) ricevuto da Veolia/Siram. Estrai i dati. Non inventare: lascia vuoto ciò che non c'è."
-    : "Questa è un'offerta/preventivo di un fornitore a Veolia/Siram. Estrai i dati. Il fornitore NON è Veolia né Siram. Non inventare.";
-  const scansione = String(testo || '').replace(/\s/g, '').length < 150;
-  let blob = null;
-  if (scansione && file && file.getSize() < 4500000) blob = file.getBlob();
-  return claude_(istr + '\nNome del file: ' + (file ? file.getName() : ''), scansione ? '' : testo, blob, schema);
+// Una richiesta a Claude per ogni PDF, spedite tutte insieme con fetchAll
+function leggiPdfInParallelo_(lista) {
+  const key = cfg_('ANTHROPIC_API_KEY');
+  const out = {};
+  if (!key || !lista.length) return out;
+  const reqs = lista.map(x => ({
+    url: 'https://api.anthropic.com/v1/messages', method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+    payload: JSON.stringify({
+      model: cfg_('CLAUDE_MODEL'), max_tokens: 800,
+      tools: [{ name: 'registra', description: 'Registra i dati del documento', input_schema: SCHEMA_DOC }],
+      tool_choice: { type: 'tool', name: 'registra' },
+      messages: [{ role: 'user', content: [
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: Utilities.base64Encode(x.f.getBlob().getBytes()) } },
+        { type: 'text', text: 'Documento di un lavoro di manutenzione impianti per Veolia/Siram. Nome del file: "' + x.nome + '". Classificalo ed estrai i dati. Non inventare: lascia vuoto ciò che non c\'è.' },
+      ] }],
+    }),
+  }));
+  let risp = [];
+  try { risp = UrlFetchApp.fetchAll(reqs); } catch (e) { console.warn('Claude: ' + e.message); return out; }
+  risp.forEach((r, i) => {
+    if (r.getResponseCode() !== 200) { console.warn('Claude ' + r.getResponseCode() + ' su ' + lista[i].nome + ': ' + r.getContentText().slice(0, 200)); return; }
+    try { const tu = (JSON.parse(r.getContentText()).content || []).find(c => c.type === 'tool_use'); if (tu) out[lista[i].f.getId()] = tu.input; } catch (e) { /* */ }
+  });
+  return out;
 }
 
 function numeroDaNomeDdt_(nome) {
@@ -195,7 +121,7 @@ function fornitoreDaNome_(nome, tipo) {
   return '';
 }
 
-// Chiamata dalla pagina: legge la cartella e restituisce l'anteprima (non scrive nulla)
+// Legge la cartella e restituisce l'anteprima (non scrive nulla)
 function analizzaCartellaImport(linkOId) {
   const id = idDaLink_(linkOId);
   if (!id) throw new Error('Link della cartella non valido');
@@ -234,45 +160,51 @@ function analizzaCartellaImport(linkOId) {
   const docs = files.filter(x => foto.indexOf(x) < 0);
   const res = { offerte: [], bdo: null, ddt: null, altri: [] };
   const dettagli = [];
-  let letti = 0;
+  const isPdf = x => /pdf/i.test(x.mime) || /\.pdf$/i.test(x.nome);
+  docs.forEach(x => { x.tipo = classificaPerNome_(x.nome); });
+
+  // 1. buono d'ordine: formato fisso Veolia, lo leggo con le regole (più affidabile dell'AI)
+  const xBdo = docs.find(x => x.tipo === 'bdo' && isPdf(x));
+  if (xBdo) {
+    const b = parseBdo_(testoPdf_(xBdo.f.getBlob()), xBdo.nome, '');
+    const numNome = (xBdo.nome.match(/\b(\d?[A-Z]{2,3}0\d{8,})\b/) || [])[1] || '';
+    res.bdo = {
+      numeroBdo: b.numeroBdo || numNome, dataBdo: dataITaISO_(b.dataBdo), fornitoreBdo: b.fornitoreBdo || fornitoreDaNome_(xBdo.nome, 'bdo'),
+      importoBdo: b.importoBdo || '', numeroOfferta: b.numeroOfferta || '', consegnaEntro: dataITaISO_(b.consegnaEntro), linkBdo: xBdo.f.getUrl(), file: xBdo.nome,
+    };
+    if (b.task && /extra/i.test(b.task) && tipoLavoro !== 'Extra') avvisi.push('ℹ️ Il buono d\'ordine è sul task "' + b.task + '": forse è un lavoro Extra.');
+    if (!res.bdo.importoBdo) avvisi.push("⚠️ Importo del buono d'ordine non letto: controllalo.");
+  }
+
+  // 2. gli altri PDF li legge Claude, tutti insieme in parallelo (il pannello ha 30 secondi)
+  const daLeggere = docs.filter(x => x !== xBdo && isPdf(x) && x.f.getSize() < 4500000 && (x.tipo !== 'bdo')).slice(0, 8);
+  const letture = leggiPdfInParallelo_(daLeggere);
   docs.forEach(x => {
-    let tipo = classificaPerNome_(x.nome);
-    const pdf = /pdf/i.test(x.mime) || /\.pdf$/i.test(x.nome);
-    let testo = '';
-    if (pdf && (tipo === 'bdo' || tipo === 'ddt' || tipo === 'offerta' || (!tipo && letti < 6))) {
-      testo = testoPdf_(x.f.getBlob()); letti++;
-      if (!tipo) tipo = classificaPerTesto_(testo);
-    }
-    if (!tipo) tipo = 'altro';
+    if (x === xBdo) { dettagli.push({ nome: x.nome, tipo: 'bdo' }); return; }
+    const c = letture[x.f.getId()] || {};
+    let tipo = x.tipo || (c.tipo && c.tipo !== 'altro' ? c.tipo : '') || 'altro';
+    if (!x.tipo && c.tipo === 'bdo' && res.bdo) tipo = 'altro';
     const link = x.f.getUrl(), fileId = x.f.getId();
-    if (tipo === 'bdo' && !res.bdo) {
-      const b = parseBdo_(testo, x.nome, '');
-      const numNome = (x.nome.match(/\b(\d?[A-Z]{2,3}0\d{8,})\b/) || [])[1] || '';
-      res.bdo = {
-        numeroBdo: b.numeroBdo || numNome, dataBdo: dataITaISO_(b.dataBdo), fornitoreBdo: b.fornitoreBdo || fornitoreDaNome_(x.nome, 'bdo'),
-        importoBdo: b.importoBdo || '', numeroOfferta: b.numeroOfferta || '', consegnaEntro: dataITaISO_(b.consegnaEntro), linkBdo: link, file: x.nome,
-        extra: /extra/i.test(b.task || '') || undefined,
-      };
-      if (b.task && /extra/i.test(b.task) && tipoLavoro !== 'Extra') avvisi.push('ℹ️ Il buono d\'ordine è sul task "' + b.task + '": forse è un lavoro Extra.');
-      if (!res.bdo.importoBdo) avvisi.push("⚠️ Importo del buono d'ordine non letto: controllalo.");
-    } else if (tipo === 'ddt' && !res.ddt) {
-      const c = datiDocumentoClaude_('ddt', testo, x.f) || {};
+    if (tipo === 'ddt' && !res.ddt) {
+      const forn = c.fornitore || fornitoreDaNome_(x.nome, 'ddt');
       res.ddt = {
-        numeroDdt: c.numeroDdt || numeroDaNomeDdt_(x.nome), data: dataITaISO_(c.dataDdt) || Utilities.formatDate(x.f.getDateCreated(), 'Europe/Rome', 'yyyy-MM-dd'),
-        fornitore: c.fornitore || fornitoreDaNome_(x.nome, 'ddt'), note: [c.fornitore || fornitoreDaNome_(x.nome, 'ddt'), c.descrizione].filter(Boolean).join(' — '),
-        linkDdt: link, file: x.nome,
+        numeroDdt: c.numero || numeroDaNomeDdt_(x.nome), data: dataITaISO_(c.data) || Utilities.formatDate(x.f.getDateCreated(), 'Europe/Rome', 'yyyy-MM-dd'),
+        fornitore: forn, note: [forn, c.descrizione].filter(Boolean).join(' — '), linkDdt: link, file: x.nome,
       };
     } else if (tipo === 'offerta') {
-      const c = datiDocumentoClaude_('offerta', testo, x.f) || {};
       res.offerte.push({
-        fornitore: c.fornitore || '', numeroOfferta: c.numeroOfferta || '', data: dataITaISO_(c.dataOfferta),
+        fornitore: c.fornitore || '', numeroOfferta: c.numero || '', data: dataITaISO_(c.data),
         importo: c.importo || '', descrizione: c.descrizione || x.nome.replace(/\.[a-z]{2,4}$/i, ''), linkDrive: link, fileId, file: x.nome,
       });
+    } else if (tipo === 'bdo' && !res.bdo) {
+      res.bdo = { numeroBdo: c.numero || '', dataBdo: dataITaISO_(c.data), fornitoreBdo: c.fornitore || '', importoBdo: c.importo || '', numeroOfferta: '', consegnaEntro: '', linkBdo: link, file: x.nome };
     } else {
+      tipo = 'altro';
       res.altri.push(x.nome);
     }
-    dettagli.push({ nome: x.nome, tipo, percorso: x.percorso, link });
+    dettagli.push({ nome: x.nome, tipo });
   });
+  if (!cfg_('ANTHROPIC_API_KEY') && daLeggere.length) avvisi.push('ℹ️ Chiave Claude non impostata: offerte e DDT letti solo dal nome del file.');
   // se l'offerta non dice chi è il fornitore, uso quello del BdO
   res.offerte.forEach(o => { if (!o.fornitore && res.bdo && res.bdo.fornitoreBdo && res.offerte.length === 1) o.fornitore = res.bdo.fornitoreBdo; });
   if (res.offerte.some(o => !o.fornitore)) avvisi.push("⚠️ Un'offerta non ha il fornitore: scrivilo, altrimenti non viene registrata.");
@@ -287,7 +219,7 @@ function analizzaCartellaImport(linkOId) {
   };
 }
 
-// Chiamata dalla pagina con l'anteprima (eventualmente corretta a mano)
+// Salva l'anteprima (eventualmente corretta a mano)
 function salvaImportCartella(prev, idPratica) {
   if (!prev || !prev.cartella) throw new Error('Anteprima mancante');
   if (!prev.titolo) throw new Error('Scrivi il titolo del lavoro');
@@ -308,4 +240,3 @@ function salvaImportCartella(prev, idPratica) {
   return { ok: true, id: r.id, stato: r.pratica ? r.pratica.stato : '', titolo: r.pratica ? r.pratica.titolo : prev.titolo };
 }
 
-function include_(nome) { return HtmlService.createHtmlOutputFromFile(nome).getContent(); }

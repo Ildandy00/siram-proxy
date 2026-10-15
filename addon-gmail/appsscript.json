@@ -4,13 +4,18 @@
   "runtimeVersion": "V8",
   "dependencies": {
     "enabledAdvancedServices": [
-      { "userSymbol": "Drive", "serviceId": "drive", "version": "v3" }
+      {
+        "userSymbol": "Drive",
+        "serviceId": "drive",
+        "version": "v3"
+      }
     ]
   },
   "oauthScopes": [
     "https://www.googleapis.com/auth/gmail.addons.execute",
     "https://www.googleapis.com/auth/gmail.addons.current.message.readonly",
     "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/drive.addons.metadata.readonly",
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/script.external_request",
@@ -20,21 +25,33 @@
     "https://siram-proxy.onrender.com/",
     "https://api.anthropic.com/"
   ],
-  "webapp": {
-    "executeAs": "USER_DEPLOYING",
-    "access": "MYSELF"
-  },
   "addOns": {
     "common": {
       "name": "Pratiche Siram",
       "logoUrl": "https://www.gstatic.com/images/icons/material/system/2x/folder_special_black_48dp.png",
-      "layoutProperties": { "primaryColor": "#3a3a3a", "secondaryColor": "#c8b464" },
-      "homepageTrigger": { "runFunction": "onHomepage" }
+      "layoutProperties": {
+        "primaryColor": "#3a3a3a",
+        "secondaryColor": "#c8b464"
+      },
+      "homepageTrigger": {
+        "runFunction": "onHomepage"
+      }
     },
     "gmail": {
       "contextualTriggers": [
-        { "unconditional": {}, "onTriggerFunction": "onGmailMessage" }
+        {
+          "unconditional": {},
+          "onTriggerFunction": "onGmailMessage"
+        }
       ]
+    },
+    "drive": {
+      "homepageTrigger": {
+        "runFunction": "onDriveHomepage"
+      },
+      "onItemsSelectedTrigger": {
+        "runFunction": "onDriveItemsSelected"
+      }
     }
   }
 }

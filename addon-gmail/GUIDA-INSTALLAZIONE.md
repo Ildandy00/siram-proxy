@@ -38,19 +38,19 @@ Unisci la PR `pratiche-v2` del repo **siram-manutenzione** → Cloudflare pubbli
 Se Veolia blocca i componenti aggiuntivi non approvati (messaggio di errore all'installazione), dimmelo:
 il ripiego è una pagina del gestionale dove si incolla il link della mail.
 
-## 4. Pagina "Importa cartella" (stesso progetto Apps Script)
+## 4. Pannello in Google Drive (stesso progetto Apps Script)
 
-1. Nel progetto **Pratiche Siram** aggiungi due file con **+ → HTML** e **+ → Script**:
-   - `Importa2` (HTML) → incolla `Importa2.html`
-   - `Importa` (Script) → incolla `Importa.gs`
-2. Sostituisci di nuovo `Codice.gs` e `appsscript.json` con le versioni nuove.
-3. *Esegui il deployment* → **Nuovo deployment** → ⚙️ tipo **App web** →
-   *Esegui come*: **Me** · *Chi ha accesso*: **Solo io** → *Esegui il deployment* → copia l'**URL dell'app web**.
-4. Esegui `provaInstallazione`: deve stampare anche "Cartelle Extra: Lavori IN CORSO" e l'URL della pagina.
-5. Nel gestionale, *Pratiche* → **📥 Importa da cartella**: la prima volta chiede l'URL copiato al punto 3.
+Lo stesso componente aggiuntivo compare anche in **Google Drive**, nella barra a destra.
 
-Quando modifichi il codice in futuro: *Gestisci deployment* → matita → *Versione: Nuova versione* → *Esegui il deployment*
-(l'URL resta lo stesso).
+1. Nel progetto **Pratiche Siram**:
+   - sostituisci `Codice.gs` e `appsscript.json` con le versioni nuove;
+   - sostituisci il file Script `Importa` con `Importa.gs`;
+   - crea un file Script **`Drive`** (+ → Script) e incolla `Drive.gs`;
+   - **elimina** il file HTML `Importa2` (non serve più) e, se l'avevi creato, il deployment "App web"
+     (*Esegui il deployment → Gestisci deployment → Archivia*).
+2. Esegui `provaInstallazione` e accetta il nuovo permesso per Drive.
+3. *Esegui il deployment* → **Deployment di prova** → controlla che sia installato (*Installa* se richiesto).
+4. Apri Google Drive e ricarica: a destra compare l'icona **Pratiche Siram**.
 
 ## Uso
 
@@ -64,12 +64,12 @@ Apri la mail → icona **Pratiche Siram** → **⚡ Analizza** → controlla →
 | Buono d'ordine della segreteria | legge numero, data, fornitore, importo, consegna; aggancia la pratica tramite il n. d'offerta |
 | Fornitore: "materiale disponibile" | segna il materiale come disponibile |
 
-**Cartelle già esistenti** (lavori iniziati prima del sistema):
-- dal gestionale **📥 Importa da cartella** o dal pannello Gmail (schermata iniziale) → scegli la cartella dall'elenco
-  (Gestione P2 ed Extra, solo quelle non ancora importate) → il sistema legge buono d'ordine, DDT, offerte e conta le foto →
-  controlli l'anteprima → **Crea pratica**;
-- in Gmail, per un nuovo lavoro, puoi scegliere **Cartella del lavoro → una già esistente** invece di crearne una;
-- su una pratica già collegata a una cartella, **📥 Completa dai documenti** aggiunge ciò che manca.
+**Cartelle già esistenti** (lavori iniziati prima del sistema), da **Google Drive**:
+- selezioni la cartella del lavoro → pannello **Pratiche Siram** a destra → **⚡ Leggi i documenti** →
+  il sistema legge buono d'ordine, DDT, offerte e conta le foto → controlli → **✅ Crea pratica**;
+- se la cartella è già collegata, il pannello lo dice e offre **📥 Completa dai documenti** (aggiunge solo ciò che manca);
+- dal gestionale, **📥 Completa dai documenti** apre la cartella e copia il link: incollalo nel pannello Drive;
+- in Gmail, per un nuovo lavoro, puoi scegliere **Cartella del lavoro → una già esistente** invece di crearne una.
 
 **Lavori Extra**: nel pannello Gmail scegli *Extra canone*; la cartella nuova nasce in "Lavori IN CORSO" con il nome
 `aaaammggPS_Kxxx_Impianto_Titolo`. Il buono d'ordine con task "Lavori extra canone" viene riconosciuto da solo.
