@@ -48,13 +48,13 @@ function aggiornaCardPush_(card) {
 // Prima schermata: nome letto, stato di collegamento, pulsante per leggere i documenti
 function cardCartella_(id, titolo) {
   let n = leggiNomeCartella_(titolo, '');
-  let tipo = /^\d{8}\s*PS/i.test(titolo) ? 'Extra' : 'Gestione';
+  let tipo = /^\d{8}/.test(titolo) ? 'Extra' : 'Gestione';
   try {
     const f = DriveApp.getFolderById(id);
     const padri = f.getParents();
     while (padri.hasNext()) {
       const p = padri.next();
-      if (p.getId() === cfg_('CARTELLA_EXTRA_ID')) { tipo = 'Extra'; break; }
+      if (COMMESSE_EXTRA.some(c => cartellaCommessa_(c.key) === p.getId())) { tipo = 'Extra'; break; }
       if (normK_(p.getName()) && titolo.indexOf(p.getName() + '_') === 0) { tipo = 'Gestione'; n = leggiNomeCartella_(titolo, p.getName()); }
     }
   } catch (er) { /* sola lettura del nome */ }

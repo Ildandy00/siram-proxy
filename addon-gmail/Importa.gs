@@ -17,7 +17,7 @@ const RE_STATO_CARTELLA = /^(DA FINIRE|DA FARE|SOSPES[OA]\b.*|ANCORA DA REALIZZA
 function leggiNomeCartella_(nome, nomePadre) {
   const r = { data: '', k: '', impianto: '', titolo: '', stato: '' };
   let resto = String(nome || '').trim();
-  let m = resto.match(/^(\d{4})(\d{2})(\d{2})\s*PS[_\s-]*/i);
+  let m = resto.match(/^(\d{4})(\d{2})(\d{2})\s*(?:[A-Z]{2,3})?[_\s-]*/i);
   if (m) { r.data = `${m[1]}-${m[2]}-${m[3]}`; resto = resto.slice(m[0].length); }
   // gestione: tolgo il nome della cartella impianto
   if (nomePadre && resto.toLowerCase().indexOf(String(nomePadre).toLowerCase() + '_') === 0) {
@@ -25,8 +25,9 @@ function leggiNomeCartella_(nome, nomePadre) {
     r.impianto = String(nomePadre).replace(/^K\s?\d+[_\s-]*/i, '').trim();
     resto = resto.slice(String(nomePadre).length + 1);
   } else {
-    m = resto.match(/^K\s?0*(\d{1,4})(?![0-9])[_\s-]*/i);
-    if (m) { r.k = 'K' + m[1].padStart(3, '0'); resto = resto.slice(m[0].length); }
+    // codice impianto: K012 (Pesaro) oppure altri formati delle commesse (es. M015)
+    m = resto.match(/^([A-Z]{1,3})\s?(\d{1,4})(?![0-9])[_\s-]*/i);
+    if (m) { r.k = /^K$/i.test(m[1]) ? 'K' + String(Number(m[2])).padStart(3, '0') : (m[1] + m[2]).toUpperCase(); resto = resto.slice(m[0].length); }
     const parti = resto.split('_').map(s => s.trim()).filter(Boolean);
     if (parti.length > 1) { r.impianto = parti.shift(); resto = parti.join('_'); }
   }
@@ -135,13 +136,13 @@ function analizzaCartellaImport(linkOId) {
   const padri = cart.getParents();
   while (padri.hasNext()) {
     const p = padri.next();
-    if (p.getId() === extraId) { tipoLavoro = 'Extra'; break; }
+    if (p.getId() === extraId || COMMESSE_EXTRA.some(c => cartellaCommessa_(c.key) === p.getId())) { tipoLavoro = 'Extra'; break; }
     const nonni = p.getParents();
     while (nonni.hasNext()) { if (nonni.next().getId() === gestId) { tipoLavoro = 'Gestione'; nomePadre = p.getName(); } }
     if (tipoLavoro) break;
   }
   if (!tipoLavoro) {
-    tipoLavoro = /^\d{8}\s*PS/i.test(nome) ? 'Extra' : 'Gestione';
+    tipoLavoro = /^\d{8}/.test(nome) ? 'Extra' : 'Gestione';
     avvisi.push('ℹ️ La cartella non è dentro "LAVORI in P2" né "Lavori IN CORSO": controlla il tipo di lavoro.');
   }
   const n = leggiNomeCartella_(nome, nomePadre);

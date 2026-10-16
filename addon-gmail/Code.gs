@@ -43,6 +43,45 @@ const TIPI = {
   archivia:   '📁 Solo archivia allegati',
 };
 const NUOVA = '__nuova__';
+const NESSUNO = '-';
+
+// Commesse con lavori Extra: ognuna ha la sua cartella "lavori in corso".
+// La sigla va nel nome delle cartelle nuove: aaaammgg + SIGLA + _Kxxx_Impianto_Titolo
+const COMMESSE_EXTRA = [
+  { key: 'pesaro',    nome: 'Pesaro',           re: /pesaro/i,    cartella: '1vRvjlIMGNsL75596iUenKjCsAeRTF034', sigla: 'PS' },
+  { key: 'verucchio', nome: 'Verucchio',        re: /verucchio/i, cartella: '1m5rc1lNc_bWeITSEJLf0ULJU8I5QZ3w3', sigla: 'PS' },
+  { key: 'misano',    nome: 'Misano Adriatico', re: /misano/i,    cartella: '1WcSCyz9iau3kt9GgsNg3kVKQaXzB8Bbe', sigla: 'PS' },
+  { key: 'gabicce',   nome: 'Gabicce Mare',     re: /gabicce/i,   cartella: '1iKV_sclqtTXVplussbVDIvc_P_3M8VpX', sigla: 'PS' },
+];
+function commessa_(key) { return COMMESSE_EXTRA.find(c => c.key === key) || COMMESSE_EXTRA[0]; }
+// la cartella si può cambiare dalle Proprietà script (CARTELLA_EXTRA_ID per Pesaro, CARTELLA_EXTRA_VERUCCHIO, ...)
+function cartellaCommessa_(key) {
+  const c = commessa_(key);
+  return (c.key === 'pesaro' ? cfg_('CARTELLA_EXTRA_ID') : cfg_('CARTELLA_EXTRA_' + c.key.toUpperCase())) || c.cartella;
+}
+function commessaDaTesto_(testo) {
+  const t = String(testo || '');
+  const trovata = COMMESSE_EXTRA.filter(c => c.key !== 'pesaro').find(c => c.re.test(t));
+  return trovata ? trovata.key : 'pesaro';
+}
+function commessaDaComune_(comune) {
+  const c = COMMESSE_EXTRA.find(x => x.re.test(String(comune || '')));
+  return c ? c.key : 'pesaro';
+}
+// Impianto scelto nel pannello: id della cartella impianto (Pesaro) oppure "IMP:codice" (impianto del gestionale)
+function infoImpianto_(sel, impianti) {
+  if (!sel || sel === NESSUNO) return null;
+  if (sel.indexOf('IMP:') === 0) {
+    const cod = sel.slice(4);
+    const i = (impianti || []).find(x => x.codice === cod) || { codice: cod, descrizione: '', comune: '' };
+    return { codice: i.codice, k: normK_(i.codice) || i.codice, nome: i.descrizione, comune: i.comune, cartellaId: '' };
+  }
+  let nome = '';
+  try { nome = (cartelleImpianti_().find(x => x.id === sel) || {}).nome || DriveApp.getFolderById(sel).getName(); } catch (e) { /* */ }
+  const k = normK_(nome);
+  const i = (impianti || []).find(x => k && normK_(x.codice) === k);
+  return { codice: i ? i.codice : k, k, nome: nome.replace(/^K\s?\d+[_\s-]*/i, ''), nomeCartella: nome, comune: i ? i.comune : 'Pesaro', cartellaId: sel };
+}
 const CREA_CARTELLA = '__crea__';
 
 // ============================================================
@@ -124,27 +163,34 @@ function trovaOCreaSottocartella_(cartellaImpiantoId, titolo) {
   if (it.hasNext()) return it.next();
   return padre.createFolder(nome);
 }
-// Nuova cartella lavoro: Gestione → dentro la cartella impianto; Extra → "Lavori IN CORSO" con il formato aaaammggPS_Kxxx_Impianto_Titolo
-function creaCartellaLavoro_(tipoLavoro, cartellaImpiantoId, titolo) {
-  if (tipoLavoro !== 'Extra') return trovaOCreaSottocartella_(cartellaImpiantoId, titolo);
-  const imp = cartellaImpiantoId ? DriveApp.getFolderById(cartellaImpiantoId).getName() : '';
-  const k = normK_(imp) || 'K000';
-  const nomeImp = imp.replace(/^K\s?\d+[_\s-]*/i, '');
-  const nome = pulisciNomeFile_(Utilities.formatDate(new Date(), 'Europe/Rome', 'yyyyMMdd') + 'PS_' + k + (nomeImp ? '_' + nomeImp : '') + '_' + titolo);
-  const radice = DriveApp.getFolderById(cfg_('CARTELLA_EXTRA_ID'));
+// Nuova cartella lavoro: Gestione → dentro la cartella impianto (solo Pesaro, "LAVORI in P2");
+// Extra → cartella della commessa, nome aaaammgg + SIGLA + _Kxxx_Impianto_Titolo
+function creaCartellaLavoro_(tipoLavoro, info, titolo, commessaKey) {
+  if (tipoLavoro !== 'Extra') {
+    if (!info || !info.cartellaId) throw new Error('Per i lavori in gestione serve un impianto di Pesaro (cartella in LAVORI in P2)');
+    return trovaOCreaSottocartella_(info.cartellaId, titolo);
+  }
+  const c = commessa_(commessaKey);
+  const nome = pulisciNomeFile_(Utilities.formatDate(new Date(), 'Europe/Rome', 'yyyyMMdd') + c.sigla + '_' + ((info && info.k) || 'K000') +
+    (info && info.nome ? '_' + info.nome : '') + '_' + titolo);
+  const radice = DriveApp.getFolderById(cartellaCommessa_(c.key));
   const it = radice.getFoldersByName(nome);
   return it.hasNext() ? it.next() : radice.createFolder(nome);
 }
 // Cartelle lavoro già esistenti per un impianto (per collegarle invece di crearne una nuova)
-function cartelleLavoroEsistenti_(tipoLavoro, cartellaImpiantoId, collegate) {
+function cartelleLavoroEsistenti_(tipoLavoro, info, collegate, commessaKey) {
   const out = [];
   try {
     if (tipoLavoro === 'Extra') {
-      const k = cartellaImpiantoId ? normK_(DriveApp.getFolderById(cartellaImpiantoId).getName()) : '';
-      const it = DriveApp.getFolderById(cfg_('CARTELLA_EXTRA_ID')).getFolders();
-      while (it.hasNext()) { const f = it.next(); const n = f.getName(); if (!/^_/.test(n) && (!k || normK_(n.replace(/^\d{8}\s*PS/i, '')) === k)) out.push({ id: f.getId(), nome: n }); }
-    } else if (cartellaImpiantoId) {
-      const it = DriveApp.getFolderById(cartellaImpiantoId).getFolders();
+      const it = DriveApp.getFolderById(cartellaCommessa_(commessaKey)).getFolders();
+      while (it.hasNext()) {
+        const f = it.next(); const n = f.getName();
+        if (/^_/.test(n)) continue;
+        const kCart = leggiNomeCartella_(n, '').k;
+        if (!info || !info.k || kCart === normK_(info.k) || n.toLowerCase().indexOf(String(info.codice || '').toLowerCase()) >= 0) out.push({ id: f.getId(), nome: n });
+      }
+    } else if (info && info.cartellaId) {
+      const it = DriveApp.getFolderById(info.cartellaId).getFolders();
       while (it.hasNext()) { const f = it.next(); out.push({ id: f.getId(), nome: f.getName() }); }
     }
   } catch (e) { console.warn(e.message); }
@@ -323,6 +369,7 @@ function analizza_(messageId) {
   a.impiantiGestionale = ctx.impianti || [];
   a.collegate = (ctx.cartelleCollegate || []).map(c => c.cartella);
   a.tipoLavoro = tipoLavoroDaTesto_(conv.testo);
+  a.commessa = commessaDaTesto_(conv.testo);
   a.cartellaLavoro = CREA_CARTELLA;
 
   // codici K citati nella conversazione
@@ -398,14 +445,21 @@ function analizza_(messageId) {
   }
   a.praticaId = pratica ? pratica.id : NUOVA;
   if (pratica && pratica.tipoLavoro) a.tipoLavoro = pratica.tipoLavoro;
-  // cartella impianto
-  try {
-    const cartelle = cartelleImpianti_();
-    const kRif = pratica ? (normK_(pratica.codiceImpianto) || normK_(pratica.nomeImpianto)) : kOrdinati[0];
-    const c = kRif ? cartelle.find(x => x.k === kRif) : null;
-    a.cartellaImpiantoId = c ? c.id : '';
-    if (!c && !pratica) a.avvisi.push(kOrdinati.length ? `⚠️ Nessuna cartella trovata per ${kOrdinati[0]}: scegli l'impianto.` : '⚠️ Impianto non riconosciuto: sceglilo dall\'elenco.');
-  } catch (e) { a.avvisi.push('⚠️ Cartella LAVORI non accessibile: ' + e.message); }
+  // impianto: per Pesaro la cartella in LAVORI in P2, per le altre commesse l'impianto del gestionale
+  a.cartellaImpiantoId = '';
+  const kRif = pratica ? (normK_(pratica.codiceImpianto) || normK_(pratica.nomeImpianto)) : kOrdinati[0];
+  if (pratica) { const ip = a.impiantiGestionale.find(i => i.codice === pratica.codiceImpianto); if (ip) a.commessa = commessaDaComune_(ip.comune); }
+  if (a.commessa !== 'pesaro') {
+    const re = commessa_(a.commessa).re;
+    const ip = a.impiantiGestionale.find(i => re.test(i.comune || '') && kRif && normK_(i.codice) === kRif);
+    if (ip) a.cartellaImpiantoId = 'IMP:' + ip.codice;
+  } else {
+    try {
+      const c = kRif ? cartelleImpianti_().find(x => x.k === kRif) : null;
+      a.cartellaImpiantoId = c ? c.id : '';
+    } catch (e) { a.avvisi.push('⚠️ Cartella LAVORI non accessibile: ' + e.message); }
+  }
+  if (!a.cartellaImpiantoId && !pratica) a.avvisi.push(kOrdinati.length ? `⚠️ Impianto ${kOrdinati[0]} non trovato: sceglilo dall'elenco.` : '⚠️ Impianto non riconosciuto: sceglilo dall\'elenco.');
   // per richieste e notizie sul materiale salvo solo ciò che è allegato alla mail aperta
   if (a.tipo === 'materiale' || a.tipo === 'richiesta') a.selezionati = conv.allegati.filter(x => x.corrente).map(x => x.mi + ':' + x.ai);
   a.campi.titolo = a.titoloSuggerito || '';
@@ -432,8 +486,11 @@ function unisciInput_(e, a) {
   });
   const t = input_(e, 'tipo'); if (t) a.tipo = t[0];
   const p = input_(e, 'pratica'); if (p) a.praticaId = p[0];
-  const c = input_(e, 'cartellaImpianto'); if (c) a.cartellaImpiantoId = c[0];
+  const cm = input_(e, 'commessa');
+  if (cm && cm[0] !== a.commessa) { a.commessa = cm[0]; a.cartellaImpiantoId = ''; a.cartellaLavoro = CREA_CARTELLA; }
+  else { const c = input_(e, 'cartellaImpianto'); if (c) a.cartellaImpiantoId = c[0] === NESSUNO ? '' : c[0]; }
   const tl = input_(e, 'tipoLavoro'); if (tl) a.tipoLavoro = tl[0];
+  if (a.tipoLavoro !== 'Extra' && a.commessa !== 'pesaro') { a.commessa = 'pesaro'; a.cartellaImpiantoId = ''; }
   const cl = input_(e, 'cartellaLavoro'); if (cl) a.cartellaLavoro = cl[0];
   // le caselle non spuntate non vengono inviate: se il widget c'era, nessun valore = nessun allegato
   if (a.allegati && a.allegati.length) a.selezionati = input_(e, 'allegati') || [];
@@ -501,7 +558,12 @@ function onCambio(e) {
   // scegliendo una pratica esistente, la cartella impianto segue la pratica
   if (a.praticaId !== NUOVA) {
     const p = a.aperte.find(x => x.id === a.praticaId);
-    if (p) { try { const c = cartelleImpianti_().find(x => x.k === (normK_(p.codiceImpianto) || normK_(p.nomeImpianto))); if (c) a.cartellaImpiantoId = c.id; } catch (er) { /* */ } }
+    if (p) {
+      const ip = (a.impiantiGestionale || []).find(i => i.codice === p.codiceImpianto);
+      a.commessa = ip ? commessaDaComune_(ip.comune) : 'pesaro';
+      if (a.commessa !== 'pesaro') a.cartellaImpiantoId = 'IMP:' + p.codiceImpianto;
+      else { try { const c = cartelleImpianti_().find(x => x.k === (normK_(p.codiceImpianto) || normK_(p.nomeImpianto))); if (c) a.cartellaImpiantoId = c.id; } catch (er) { /* */ } }
+    }
   }
   salvaStato_(a);
   return aggiornaCard_(cardModulo_(a));
@@ -560,19 +622,35 @@ function cardModulo_(a) {
   if (a.praticaId === NUOVA) {
     const selTL = CardService.newSelectionInput().setType(CardService.SelectionInputType.RADIO_BUTTON).setFieldName('tipoLavoro').setTitle('Tipo lavoro').setOnChangeAction(cambio);
     selTL.addItem('In gestione (P2)', 'Gestione', a.tipoLavoro !== 'Extra').addItem('Extra canone', 'Extra', a.tipoLavoro === 'Extra');
+    // commessa (solo per gli Extra: ognuna ha la sua cartella lavori)
+    const extra = a.tipoLavoro === 'Extra';
+    const comm = extra ? (a.commessa || 'pesaro') : 'pesaro';
+    let selComm = null;
+    if (extra) {
+      selComm = CardService.newSelectionInput().setType(CardService.SelectionInputType.DROPDOWN).setFieldName('commessa').setTitle('Commessa').setOnChangeAction(cambio);
+      COMMESSE_EXTRA.forEach(c => selComm.addItem(c.nome, c.key, c.key === comm));
+    }
     const selImp = CardService.newSelectionInput().setType(CardService.SelectionInputType.DROPDOWN).setFieldName('cartellaImpianto').setTitle('Impianto').setOnChangeAction(cambio);
-    let cartelle = [];
-    try { cartelle = cartelleImpianti_(); } catch (er) { /* avviso già mostrato */ }
-    selImp.addItem('— scegli —', '', !a.cartellaImpiantoId);
-    cartelle.forEach(c => selImp.addItem(tronca_(c.nome, 60), c.id, c.id === a.cartellaImpiantoId));
+    selImp.addItem('— scegli l\'impianto —', NESSUNO, !a.cartellaImpiantoId);
+    if (comm === 'pesaro') {
+      let cartelle = [];
+      try { cartelle = cartelleImpianti_(); } catch (er) { /* avviso già mostrato */ }
+      cartelle.forEach(c => selImp.addItem(tronca_(c.nome, 60), c.id, c.id === a.cartellaImpiantoId));
+    } else {
+      const re = commessa_(comm).re;
+      (a.impiantiGestionale || []).filter(i => re.test(i.comune || '')).sort((x, y) => String(x.codice).localeCompare(String(y.codice)))
+        .forEach(i => selImp.addItem(tronca_(i.codice + ' — ' + i.descrizione, 60), 'IMP:' + i.codice, 'IMP:' + i.codice === a.cartellaImpiantoId));
+    }
+    const infoImp = infoImpianto_(a.cartellaImpiantoId, a.impiantiGestionale);
     // cartella del lavoro: nuova oppure una già esistente non ancora collegata
     const selCart = CardService.newSelectionInput().setType(CardService.SelectionInputType.DROPDOWN).setFieldName('cartellaLavoro').setTitle('Cartella del lavoro').setOnChangeAction(cambio);
     selCart.addItem('➕ Crea una cartella nuova', CREA_CARTELLA, a.cartellaLavoro === CREA_CARTELLA);
-    const esistenti = (a.cartellaImpiantoId || a.tipoLavoro === 'Extra') ? cartelleLavoroEsistenti_(a.tipoLavoro, a.cartellaImpiantoId, a.collegate) : [];
+    const esistenti = (a.cartellaImpiantoId || extra) ? cartelleLavoroEsistenti_(a.tipoLavoro, infoImp, a.collegate, comm) : [];
     esistenti.slice(0, 60).forEach(c => selCart.addItem('📁 ' + tronca_(c.nome, 70), c.id, c.id === a.cartellaLavoro));
     const usaEsistente = a.cartellaLavoro && a.cartellaLavoro !== CREA_CARTELLA;
-    card.addSection(CardService.newCardSection().setHeader('Nuovo lavoro')
-      .addWidget(selTL)
+    const sezNuovo = CardService.newCardSection().setHeader('Nuovo lavoro').addWidget(selTL);
+    if (selComm) sezNuovo.addWidget(selComm);
+    card.addSection(sezNuovo
       .addWidget(selImp)
       .addWidget(selCart)
       .addWidget(campoTesto_('titolo', 'Titolo lavoro *', a.campi.titolo, false, usaEsistente ? 'Se vuoto, uso il nome della cartella' : 'Diventa il nome della cartella'))
@@ -646,40 +724,44 @@ function onConferma(e) {
     // 1. pratica nuova: sottocartella + pratica
     if (!pratica) {
       const usaEsistente = a.cartellaLavoro && a.cartellaLavoro !== CREA_CARTELLA;
-      let k = '', nomeImp = '', titolo = c.titolo;
+      let titolo = c.titolo;
+      const comm = a.tipoLavoro === 'Extra' ? (a.commessa || 'pesaro') : 'pesaro';
+      const info = infoImpianto_(a.cartellaImpiantoId, a.impiantiGestionale);
+      let codice = info ? info.codice : '', nomeImp = info ? (info.nomeCartella || info.nome) : '';
       if (usaEsistente) {
         // cartella già creata a mano: impianto e titolo li ricavo dal nome se non li hai scritti
         cartellaLavoro = DriveApp.getFolderById(a.cartellaLavoro);
-        const padreNome = a.cartellaImpiantoId ? DriveApp.getFolderById(a.cartellaImpiantoId).getName() : '';
-        const n = leggiNomeCartella_(cartellaLavoro.getName(), a.tipoLavoro === 'Extra' ? '' : padreNome);
-        k = n.k || normK_(padreNome); nomeImp = padreNome || n.impianto;
+        const n = leggiNomeCartella_(cartellaLavoro.getName(), a.tipoLavoro === 'Extra' ? '' : (info && info.nomeCartella) || '');
+        if (!codice) { const ip = (a.impiantiGestionale || []).find(i => n.k && normK_(i.codice) === n.k); codice = ip ? ip.codice : n.k; }
+        if (!nomeImp) nomeImp = n.impianto;
         if (!titolo) titolo = n.titolo;
       } else {
-        if (!a.cartellaImpiantoId) throw new Error("Scegli l'impianto");
+        if (!info) throw new Error("Scegli l'impianto");
         if (!titolo) throw new Error('Scrivi il titolo del lavoro');
-        cartellaLavoro = creaCartellaLavoro_(a.tipoLavoro, a.cartellaImpiantoId, titolo);
-        const cartImp = cartelleImpianti_().find(x => x.id === a.cartellaImpiantoId) || { nome: DriveApp.getFolderById(a.cartellaImpiantoId).getName() };
-        k = normK_(cartImp.nome); nomeImp = cartImp.nome;
+        cartellaLavoro = creaCartellaLavoro_(a.tipoLavoro, info, titolo, comm);
       }
-      if (!k) throw new Error("Impianto non riconosciuto: sceglilo dall'elenco");
-      const imp = (a.impiantiGestionale || []).find(i => normK_(i.codice) === k);
+      if (!codice) throw new Error("Impianto non riconosciuto: sceglilo dall'elenco");
       const r = azione_('crea', {
-        codiceImpianto: imp ? imp.codice : k, nomeImpianto: nomeImp, titolo, ubicazione: c.ubicazione, tipoLavoro: a.tipoLavoro,
+        codiceImpianto: codice, nomeImpianto: nomeImp, titolo, ubicazione: c.ubicazione, tipoLavoro: a.tipoLavoro,
         problema: c.problema, richiestoDa: c.richiestoDa, cartellaDriveId: cartellaLavoro.getId(), linkCartella: cartellaLavoro.getUrl(),
         threadId: a.threadId, origine: 'Gmail',
         dataRichiestaOfferte: a.tipo === 'richiesta' ? oggi_() : '',
       });
       pratica = r.pratica;
       a.praticaCreataDaCartella = usaEsistente;
-      fatto.push(`Pratica ${a.tipoLavoro === 'Extra' ? 'Extra' : 'in gestione'} creata: ${titolo}`);
+      fatto.push(`Pratica ${a.tipoLavoro === 'Extra' ? 'Extra ' + commessa_(comm).nome : 'in gestione'} creata: ${titolo}`);
       fatto.push((usaEsistente ? 'Collegata la cartella: ' : 'Cartella: ') + cartellaLavoro.getName());
     } else {
       // pratica esistente senza cartella → la creo ora
       if (pratica.cartellaDriveId) cartellaLavoro = DriveApp.getFolderById(pratica.cartellaDriveId);
       else {
-        const cartImpId = a.cartellaImpiantoId || (cartelleImpianti_().find(x => x.k === (normK_(pratica.codiceImpianto) || normK_(pratica.nomeImpianto))) || {}).id;
-        if (!cartImpId) throw new Error("Cartella dell'impianto non trovata: sceglila come nuovo lavoro o collega la cartella dal gestionale");
-        cartellaLavoro = creaCartellaLavoro_(pratica.tipoLavoro, cartImpId, pratica.titolo || c.titolo || 'Lavoro');
+        const ip = (a.impiantiGestionale || []).find(i => i.codice === pratica.codiceImpianto);
+        const comm = ip ? commessaDaComune_(ip.comune) : 'pesaro';
+        let sel = a.cartellaImpiantoId;
+        if (!sel) sel = comm !== 'pesaro' ? 'IMP:' + pratica.codiceImpianto : (cartelleImpianti_().find(x => x.k === (normK_(pratica.codiceImpianto) || normK_(pratica.nomeImpianto))) || {}).id;
+        const info = infoImpianto_(sel, a.impiantiGestionale);
+        if (!info) throw new Error("Impianto della pratica non trovato: collega la cartella dal gestionale");
+        cartellaLavoro = creaCartellaLavoro_(pratica.tipoLavoro, info, pratica.titolo || c.titolo || 'Lavoro', comm);
         azione_('aggiorna', { id: pratica.id, campi: { cartellaDriveId: cartellaLavoro.getId(), linkCartella: cartellaLavoro.getUrl() } });
         fatto.push('Cartella creata: ' + cartellaLavoro.getName());
       }
@@ -761,5 +843,5 @@ function provaInstallazione() {
   console.log('Cartelle impianto: ' + cartelleImpianti_(true).length);
   console.log('Server: ' + JSON.stringify(server_('get', '/addon/contesto')).slice(0, 200));
   console.log('Claude: ' + (cfg_('ANTHROPIC_API_KEY') ? 'chiave presente' : 'chiave MANCANTE'));
-  console.log('Cartelle Extra: ' + DriveApp.getFolderById(cfg_('CARTELLA_EXTRA_ID')).getName());
+  COMMESSE_EXTRA.forEach(c => { try { console.log('Extra ' + c.nome + ': ' + DriveApp.getFolderById(cartellaCommessa_(c.key)).getName()); } catch (e) { console.log('Extra ' + c.nome + ': ❌ ' + e.message); } });
 }
