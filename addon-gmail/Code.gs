@@ -69,8 +69,21 @@ function commessaDaComune_(comune) {
   return c ? c.key : 'pesaro';
 }
 // Impianto scelto nel pannello: id della cartella impianto (Pesaro) oppure "IMP:codice" (impianto del gestionale)
-function infoImpianto_(sel, impianti) {
+const MANUALE = 'MANUALE';
+function infoImpianto_(sel, impianti, campi) {
   if (!sel || sel === NESSUNO) return null;
+  // impianto non presente tra le cartelle di LAVORI in P2: la cartella impianto verrà creata
+  if (sel === MANUALE) {
+    const cod = String((campi && campi.nuovoCodice) || '').trim();
+    if (!cod) return null;
+    const k = normK_(cod) || cod.toUpperCase();
+    return { codice: k, k, nome: String((campi && campi.nuovoNome) || '').trim(), comune: 'Pesaro', cartellaId: '', creaCartella: true };
+  }
+  if (sel.indexOf('NEWIMP:') === 0) {
+    const cod = sel.slice(7);
+    const i = (impianti || []).find(x => x.codice === cod) || { codice: cod, descrizione: '', comune: 'Pesaro' };
+    return { codice: i.codice, k: normK_(i.codice) || i.codice, nome: i.descrizione, comune: i.comune, cartellaId: '', creaCartella: true };
+  }
   if (sel.indexOf('IMP:') === 0) {
     const cod = sel.slice(4);
     const i = (impianti || []).find(x => x.codice === cod) || { codice: cod, descrizione: '', comune: '' };
@@ -163,10 +176,24 @@ function trovaOCreaSottocartella_(cartellaImpiantoId, titolo) {
   if (it.hasNext()) return it.next();
   return padre.createFolder(nome);
 }
+// Cartella impianto mancante in "LAVORI in P2": la creo con il formato Kxxx_Nome impianto
+function creaCartellaImpianto_(info) {
+  if (!info.k) throw new Error('Scrivi il codice impianto (es. K123)');
+  if (!info.nome) throw new Error("Scrivi il nome dell'impianto");
+  const nome = pulisciNomeFile_(info.k + '_' + info.nome);
+  const radice = DriveApp.getFolderById(cfg_('CARTELLA_RADICE_ID'));
+  // se nel frattempo esiste già una cartella con lo stesso codice, uso quella
+  const gia = cartelleImpianti_(true).find(x => x.k && x.k === normK_(info.k));
+  if (gia) return DriveApp.getFolderById(gia.id);
+  const f = radice.createFolder(nome);
+  cartelleImpianti_(true);
+  return f;
+}
 // Nuova cartella lavoro: Gestione → dentro la cartella impianto (solo Pesaro, "LAVORI in P2");
 // Extra → cartella della commessa, nome aaaammgg + SIGLA + _Kxxx_Impianto_Titolo
 function creaCartellaLavoro_(tipoLavoro, info, titolo, commessaKey) {
   if (tipoLavoro !== 'Extra') {
+    if (info && !info.cartellaId && info.creaCartella) info.cartellaId = creaCartellaImpianto_(info).getId();
     if (!info || !info.cartellaId) throw new Error('Per i lavori in gestione serve un impianto di Pesaro (cartella in LAVORI in P2)');
     return trovaOCreaSottocartella_(info.cartellaId, titolo);
   }
@@ -480,7 +507,7 @@ function input_(e, nome) {
   return v;
 }
 function unisciInput_(e, a) {
-  ['titolo', 'ubicazione', 'problema', 'richiestoDa', 'fornitore', 'numeroOfferta', 'dataOfferta', 'importo', 'descrizioneOfferta',
+  ['nuovoCodice', 'nuovoNome', 'titolo', 'ubicazione', 'problema', 'richiestoDa', 'fornitore', 'numeroOfferta', 'dataOfferta', 'importo', 'descrizioneOfferta',
     'numeroBdo', 'dataBdo', 'fornitoreBdo', 'importoBdo', 'consegnaEntro', 'noteMateriale', 'statoMateriale'].forEach(k => {
     const v = input_(e, k); if (v) a.campi[k] = v[0];
   });
@@ -636,12 +663,18 @@ function cardModulo_(a) {
       let cartelle = [];
       try { cartelle = cartelleImpianti_(); } catch (er) { /* avviso già mostrato */ }
       cartelle.forEach(c => selImp.addItem(tronca_(c.nome, 60), c.id, c.id === a.cartellaImpiantoId));
+      // impianti di Pesaro del gestionale che non hanno ancora la cartella: si crea alla conferma
+      const kConCartella = cartelle.map(c => c.k).filter(Boolean);
+      (a.impiantiGestionale || []).filter(i => commessa_('pesaro').re.test(i.comune || '') && kConCartella.indexOf(normK_(i.codice)) < 0)
+        .sort((x, y) => String(x.codice).localeCompare(String(y.codice)))
+        .forEach(i => selImp.addItem(tronca_('➕ ' + i.codice + ' — ' + i.descrizione + ' (nuova cartella)', 60), 'NEWIMP:' + i.codice, 'NEWIMP:' + i.codice === a.cartellaImpiantoId));
+      selImp.addItem('✏️ Altro impianto: scrivo codice e nome', MANUALE, a.cartellaImpiantoId === MANUALE);
     } else {
       const re = commessa_(comm).re;
       (a.impiantiGestionale || []).filter(i => re.test(i.comune || '')).sort((x, y) => String(x.codice).localeCompare(String(y.codice)))
         .forEach(i => selImp.addItem(tronca_(i.codice + ' — ' + i.descrizione, 60), 'IMP:' + i.codice, 'IMP:' + i.codice === a.cartellaImpiantoId));
     }
-    const infoImp = infoImpianto_(a.cartellaImpiantoId, a.impiantiGestionale);
+    const infoImp = infoImpianto_(a.cartellaImpiantoId, a.impiantiGestionale, a.campi);
     // cartella del lavoro: nuova oppure una già esistente non ancora collegata
     const selCart = CardService.newSelectionInput().setType(CardService.SelectionInputType.DROPDOWN).setFieldName('cartellaLavoro').setTitle('Cartella del lavoro').setOnChangeAction(cambio);
     selCart.addItem('➕ Crea una cartella nuova', CREA_CARTELLA, a.cartellaLavoro === CREA_CARTELLA);
@@ -650,8 +683,15 @@ function cardModulo_(a) {
     const usaEsistente = a.cartellaLavoro && a.cartellaLavoro !== CREA_CARTELLA;
     const sezNuovo = CardService.newCardSection().setHeader('Nuovo lavoro').addWidget(selTL);
     if (selComm) sezNuovo.addWidget(selComm);
+    sezNuovo.addWidget(selImp);
+    if (a.cartellaImpiantoId === MANUALE) {
+      sezNuovo.addWidget(campoTesto_('nuovoCodice', 'Codice impianto *', a.campi.nuovoCodice || (a.kTrovati || [])[0] || '', false, 'Es. K123'))
+        .addWidget(campoTesto_('nuovoNome', 'Nome impianto *', a.campi.nuovoNome || '', false, 'Es. Scuola Materna ARCOBALENO'));
+    }
+    if (infoImp && infoImp.creaCartella && !extra) {
+      sezNuovo.addWidget(CardService.newTextParagraph().setText('📁 Alla conferma creo anche la cartella impianto <b>' + (infoImp.k || 'Kxxx') + '_' + (infoImp.nome || '…') + '</b> in LAVORI in P2.'));
+    }
     card.addSection(sezNuovo
-      .addWidget(selImp)
       .addWidget(selCart)
       .addWidget(campoTesto_('titolo', 'Titolo lavoro *', a.campi.titolo, false, usaEsistente ? 'Se vuoto, uso il nome della cartella' : 'Diventa il nome della cartella'))
       .addWidget(campoTesto_('ubicazione', 'Ubicazione', a.campi.ubicazione))
@@ -726,7 +766,7 @@ function onConferma(e) {
       const usaEsistente = a.cartellaLavoro && a.cartellaLavoro !== CREA_CARTELLA;
       let titolo = c.titolo;
       const comm = a.tipoLavoro === 'Extra' ? (a.commessa || 'pesaro') : 'pesaro';
-      const info = infoImpianto_(a.cartellaImpiantoId, a.impiantiGestionale);
+      const info = infoImpianto_(a.cartellaImpiantoId, a.impiantiGestionale, c);
       let codice = info ? info.codice : '', nomeImp = info ? (info.nomeCartella || info.nome) : '';
       if (usaEsistente) {
         // cartella già creata a mano: impianto e titolo li ricavo dal nome se non li hai scritti
@@ -736,9 +776,11 @@ function onConferma(e) {
         if (!nomeImp) nomeImp = n.impianto;
         if (!titolo) titolo = n.titolo;
       } else {
-        if (!info) throw new Error("Scegli l'impianto");
+        if (!info) throw new Error(a.cartellaImpiantoId === MANUALE ? 'Scrivi il codice impianto' : "Scegli l'impianto");
+        const nuovaCartImp = info.creaCartella && a.tipoLavoro !== 'Extra';
         if (!titolo) throw new Error('Scrivi il titolo del lavoro');
         cartellaLavoro = creaCartellaLavoro_(a.tipoLavoro, info, titolo, comm);
+        if (nuovaCartImp) fatto.push('Cartella impianto creata: ' + info.k + '_' + info.nome);
       }
       if (!codice) throw new Error("Impianto non riconosciuto: sceglilo dall'elenco");
       const r = azione_('crea', {
