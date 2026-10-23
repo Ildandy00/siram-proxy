@@ -808,8 +808,11 @@ module.exports = function mountOrariCoster(app) {
       return res.json({ stato: job.stato, annulla_richiesto: true });
     }
 
-    if (stato === 'scrittura' && !['confermato', 'scrittura'].includes(job.stato)) {
-      return res.status(409).json({ error: 'Scrittura non confermata dal sito.' });
+    // 23/10/2026: "Applica programma" scrive senza conferma dal sito. L'agente passa
+    // da 'lettura' a 'scrittura' direttamente; il passaggio da 'attesa_conferma' /
+    // 'confermato' resta accettato per gli agenti vecchi.
+    if (stato === 'scrittura' && !['lettura', 'connessione', 'preso', 'confermato', 'scrittura'].includes(job.stato)) {
+      return res.status(409).json({ error: 'Transizione non valida.' });
     }
     if (['verifica', 'rollback'].includes(stato)
         && !['scrittura', 'verifica', 'rollback'].includes(job.stato)) {
