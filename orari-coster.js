@@ -28,7 +28,8 @@ const crypto = require('crypto');
 
 const AGENT_ONLINE_MS = 40 * 1000;          // agente considerato collegato
                                             // (manda un ping ogni 10 s anche mentre lavora)
-const QUEUE_EXPIRE_MS = 30 * 60 * 1000;     // lavoro mai preso → scaduto
+const QUEUE_EXPIRE_MS = 30 * 60 * 1000;     // lavoro mai preso → scaduto (agente non collegato)
+const QUEUE_MAX_MS = 3 * 3600 * 1000;       // 27/10/2026: con l'agente collegato la coda puo' essere lunga
 const CONFIRM_EXPIRE_MS = 12 * 60 * 1000;   // l'agente rinuncia già a 10 min
 const STALE_JOB_MS = 20 * 60 * 1000;        // lavoro in corso senza notizie
 const KEEP_FINAL_JOBS = 100;
@@ -619,8 +620,11 @@ module.exports = function mountOrariCoster(app) {
     for (const job of state.jobs.values()) {
       if (FINAL_STATES.has(job.stato)) continue;
 
-      if (job.stato === 'in_coda' && now - job.creato > QUEUE_EXPIRE_MS) {
-        setState(job, 'scaduto', 'Agente non disponibile entro 30 minuti: richiesta non eseguita.');
+      const agenteVivo = now - state.agent.lastSeen < AGENT_ONLINE_MS;
+      if (job.stato === 'in_coda' && now - job.creato > (agenteVivo ? QUEUE_MAX_MS : QUEUE_EXPIRE_MS)) {
+        setState(job, 'scaduto', agenteVivo
+          ? 'Rimasta in coda per 3 ore: richiesta non eseguita.'
+          : 'Agente non disponibile entro 30 minuti: richiesta non eseguita.');
       } else if (job.stato === 'attesa_conferma' && now - job.aggiornato > CONFIRM_EXPIRE_MS) {
         setState(job, 'annullato', 'Conferma non arrivata in tempo: nessuna modifica eseguita.');
       } else if (job.stato !== 'in_coda' && job.stato !== 'attesa_conferma'
@@ -740,7 +744,8 @@ module.exports = function mountOrariCoster(app) {
 
     const next = [...state.jobs.values()]
       .filter((j) => j.stato === 'in_coda')
-      .sort((a, b) => a.creato - b.creato)[0];
+      // 27/10/2026: le letture (veloci, spesso dalla fotografia) passano davanti alle modifiche in coda
+      .sort((a, b) => ((a.tipo === 'lettura' ? 0 : 1) - (b.tipo === 'lettura' ? 0 : 1)) || (a.creato - b.creato))[0];
 
     let job = null;
     if (next && !needCatalog && !straOps.length && !spegOps.length) {   // prima si registrano straordinari e spegnimenti
