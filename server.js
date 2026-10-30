@@ -143,7 +143,7 @@ app.get('/dati', async (req, res) => {
     ]);
     const impianti   = rImp.slice(1).filter(r=>r[0]).map(r=>({ codice:r[0]||'', descrizione:r[1]||'', comune:r[2]||'', indirizzo:r[3]||'', operaioDefault:r[4]||'' }));
     const catalogo   = rCat.slice(1).filter(r=>r[0]).map(r=>({ codiceImpianto:r[0]||'', tipoVisita:r[1]||'', attivita:r[2]||'', ordine:Number(r[3])||0, obbligatoria:r[4]||'SI' }));
-    const interventi = rInt.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', codiceImpianto:r[1]||'', dataPrevista:fmtData(r[2]), operaio:r[3]||'', tipoVisita:r[4]||'', stato:r[5]||'', note:r[6]||'', dataChiusura:fmtData(r[7]), creatoIl:fmtData(r[8]), secondoOperaio:r[9]||'', interventoCollegato:r[10]||'', linkDrive:r[11]||'', dataFine:fmtData(r[12]), operaioSecondario2:r[13]||'', notaChiusura:r[14]||'', noteResponsabile:r[15]||'' }));
+    const interventi = rInt.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', codiceImpianto:r[1]||'', dataPrevista:fmtData(r[2]), operaio:r[3]||'', tipoVisita:r[4]||'', stato:r[5]||'', note:r[6]||'', dataChiusura:fmtData(r[7]), creatoIl:fmtData(r[8]), secondoOperaio:r[9]||'', interventoCollegato:r[10]||'', linkDrive:r[11]||'', dataFine:fmtData(r[12]), operaioSecondario2:r[13]||'', notaChiusura:r[14]||'', noteResponsabile:r[15]||'', oreImpiegate:r[16]||'' }));
     const checklist  = rChk.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', idIntervento:r[1]||'', attivita:r[2]||'', eseguita:r[3]||'NO', oraCompletamento:fmtDateTime(r[4]), note:r[5]||'', extra:r[6]||'NO' }));
     res.json({ impianti, catalogo, interventi, checklist });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
@@ -185,6 +185,22 @@ app.post('/aggiorna-voce', async (req, res) => {
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
 
+// La colonna Q (ore impiegate) puo' non esistere ancora nel foglio Interventi: Google rifiuterebbe la scrittura
+let colonnaOreOk = false;
+async function assicuraColonnaOre(sheets, rows) {
+  if (colonnaOreOk) return;
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID, fields: 'sheets.properties' });
+  const sh = meta.data.sheets.find(x => x.properties.title === SH.INTERVENTI);
+  const attuali = (sh && sh.properties.gridProperties && sh.properties.gridProperties.columnCount) || 0;
+  if (sh && attuali < 17) {
+    await sheets.spreadsheets.batchUpdate({ spreadsheetId: SHEET_ID, requestBody: { requests: [{ appendDimension: { sheetId: sh.properties.sheetId, dimension: 'COLUMNS', length: 17 - attuali } }] } });
+  }
+  if (!(rows[0] && rows[0][16])) {
+    await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!Q1`, valueInputOption: 'RAW', requestBody: { values: [['OreImpiegate']] } });
+  }
+  colonnaOreOk = true;
+}
+
 app.post('/aggiorna-intervento', async (req, res) => {
   try {
     const { id, stato, operaio } = req.body;
@@ -213,6 +229,15 @@ app.post('/aggiorna-intervento', async (req, res) => {
       if (rowNota > 0) {
         // Nota di chiusura dell'operaio nella colonna dedicata O
         await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!O${rowNota+1}`, valueInputOption: 'RAW', requestBody: { values: [[notaChiusura]] } });
+      }
+    }
+    // Tempo impiegato (ore) dichiarato dall'operaio alla chiusura: colonna dedicata Q, come numero
+    const oreImpiegate = parseFloat(String(req.body.oreImpiegate === undefined ? '' : req.body.oreImpiegate).replace(',', '.'));
+    if (stato === 'Chiuso' && oreImpiegate > 0) {
+      const rowOre = rows.findIndex((r,idx) => idx > 0 && r[0] === id);
+      if (rowOre > 0) {
+        await assicuraColonnaOre(sheets, rows);
+        await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!Q${rowOre+1}`, valueInputOption: 'RAW', requestBody: { values: [[oreImpiegate]] } });
       }
     }
     const noteResponsabile = req.body.noteResponsabile;
@@ -264,7 +289,7 @@ app.get('/dati-responsabile', async (req, res) => {
     ]);
     const impianti   = rImp.slice(1).filter(r=>r[0]).map(r=>({ codice:r[0]||'', descrizione:r[1]||'', comune:r[2]||'', indirizzo:r[3]||'', operaioDefault:r[4]||'' }));
     const catalogo   = rCat.slice(1).filter(r=>r[0]).map(r=>({ codiceImpianto:r[0]||'', tipoVisita:r[1]||'', attivita:r[2]||'', ordine:Number(r[3])||0, obbligatoria:r[4]||'SI' }));
-    const interventi = rInt.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', codiceImpianto:r[1]||'', dataPrevista:fmtData(r[2]), operaio:r[3]||'', tipoVisita:r[4]||'', stato:r[5]||'', note:r[6]||'', dataChiusura:fmtData(r[7]), creatoIl:fmtData(r[8]), secondoOperaio:r[9]||'', interventoCollegato:r[10]||'', linkDrive:r[11]||'', dataFine:fmtData(r[12]), operaioSecondario2:r[13]||'', notaChiusura:r[14]||'', noteResponsabile:r[15]||'' }));
+    const interventi = rInt.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', codiceImpianto:r[1]||'', dataPrevista:fmtData(r[2]), operaio:r[3]||'', tipoVisita:r[4]||'', stato:r[5]||'', note:r[6]||'', dataChiusura:fmtData(r[7]), creatoIl:fmtData(r[8]), secondoOperaio:r[9]||'', interventoCollegato:r[10]||'', linkDrive:r[11]||'', dataFine:fmtData(r[12]), operaioSecondario2:r[13]||'', notaChiusura:r[14]||'', noteResponsabile:r[15]||'', oreImpiegate:r[16]||'' }));
     const checklist  = rChk.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', idIntervento:r[1]||'', attivita:r[2]||'', eseguita:r[3]||'NO', oraCompletamento:fmtDateTime(r[4]), note:r[5]||'', extra:r[6]||'NO' }));
     const assenze    = rAss.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', operaio:r[1]||'', dataInizio:fmtData(r[2]), dataFine:fmtData(r[3]), tipo:r[4]||'', note:r[5]||'' }));
     // Pratiche v2 — stato calcolato dai dati (vedi pratiche.js)
