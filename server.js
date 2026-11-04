@@ -92,7 +92,39 @@ function getAuth() {
   const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
   return new google.auth.GoogleAuth({ credentials: creds, scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
 }
-async function getSheets() { const auth = getAuth(); return google.sheets({ version: 'v4', auth }); }
+// Letture del foglio (04/11/2026). Dopo un rifiuto di Google ("Quota exceeded", 60 letture al minuto
+// per l'account del server) per PAUSA_QUOTA_MS non si chiede piu' niente a Google: ogni richiesta che
+// riprovava subito teneva il limite sempre superato. Nel frattempo le GET rispondono con l'ultima copia
+// buona (vedi COPIA_MS piu' sotto). Le scritture non passano di qui e hanno un limite a parte.
+const PAUSA_QUOTA_MS = 30 * 1000;
+let googleFermoFino = 0;
+const lettureGoogle = [];   // { t, rifiutata } degli ultimi minuti, per /stato-letture
+function erroreQuota(e) { return !!e && (e.code === 429 || /quota/i.test(String(e.message))); }
+function conPausa(oggetto, nome) {
+  if (!oggetto || typeof oggetto[nome] !== 'function') return;
+  const orig = oggetto[nome].bind(oggetto);
+  oggetto[nome] = async (...a) => {
+    if (Date.now() < googleFermoFino) {
+      throw new Error(`Quota exceeded: letture sospese per ${Math.ceil((googleFermoFino - Date.now()) / 1000)} s dopo un rifiuto di Google`);
+    }
+    try {
+      const r = await orig(...a);
+      lettureGoogle.push({ t: Date.now(), rifiutata: false });
+      return r;
+    } catch (e) {
+      lettureGoogle.push({ t: Date.now(), rifiutata: erroreQuota(e) });
+      if (erroreQuota(e)) googleFermoFino = Date.now() + PAUSA_QUOTA_MS;
+      throw e;
+    }
+  };
+}
+async function getSheets() {
+  const sheets = google.sheets({ version: 'v4', auth: getAuth() });
+  conPausa(sheets.spreadsheets.values, 'get');
+  conPausa(sheets.spreadsheets.values, 'batchGet');
+  conPausa(sheets.spreadsheets, 'get');
+  return sheets;
+}
 
 app.use(cors());
 app.use(express.json());
@@ -114,6 +146,43 @@ const GET_CON_COPIA = new Set(['/dati', '/dati-responsabile', '/impianti-operaio
 const copie = new Map();    // url -> { quando, corpo }  copia fresca, si butta a ogni scrittura
 const buone = new Map();    // url -> { quando, corpo }  ultima risposta buona, solo per gli errori
 let generazione = 0;        // cambia a ogni scrittura: una lettura partita prima non si salva
+// Chi chiama (per /stato-letture): sito o app e tipo di dispositivo, niente indirizzi IP.
+const richieste = [];       // { t, percorso, da }
+function provenienza(req) {
+  const o = String(req.get('origin') || req.get('referer') || '').replace(/^https?:\/\//, '').split('/')[0];
+  const ua = String(req.get('user-agent') || '');
+  const tipo = /; wv\)/.test(ua) ? 'app Android' : /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iPhone'
+    : /Windows/.test(ua) ? 'Windows' : /Macintosh/.test(ua) ? 'Mac' : (ua.split(/[ /]/)[0] || 'sconosciuto');
+  return (o || 'senza origine') + ' · ' + tipo;
+}
+function pulisciRegistri() {
+  const limite = Date.now() - 10 * 60 * 1000;
+  while (richieste.length && richieste[0].t < limite) richieste.shift();
+  while (lettureGoogle.length && lettureGoogle[0].t < limite) lettureGoogle.shift();
+}
+app.use((req, res, next) => {
+  if (req.method !== 'OPTIONS' && req.path !== '/stato-letture' && !/^\/(orari|analisi)\//.test(req.path)) {
+    richieste.push({ t: Date.now(), percorso: req.method + ' ' + req.path, da: provenienza(req) });
+    if (richieste.length > 20000) richieste.splice(0, 5000);
+  }
+  next();
+});
+app.get('/stato-letture', (req, res) => {
+  pulisciRegistri();
+  const ora = Date.now();
+  const conta = (lista, chiave, dopo) => lista.filter(x => x.t >= dopo).reduce((m, x) => { m[x[chiave]] = (m[x[chiave]] || 0) + 1; return m; }, {});
+  const ordina = (m) => Object.fromEntries(Object.entries(m).sort((a, b) => b[1] - a[1]));
+  const g1 = lettureGoogle.filter(x => x.t >= ora - 60000);
+  res.json({
+    ora: new Date(ora).toISOString(),
+    google_ultimo_minuto: { letture: g1.filter(x => !x.rifiutata).length, rifiutate: g1.filter(x => x.rifiutata).length },
+    letture_sospese_fino: googleFermoFino > ora ? new Date(googleFermoFino).toISOString() : null,
+    richieste_ultimi_5_minuti: {
+      per_percorso: ordina(conta(richieste, 'percorso', ora - 5 * 60000)),
+      per_provenienza: ordina(conta(richieste, 'da', ora - 5 * 60000)),
+    },
+  });
+});
 app.use((req, res, next) => {
   if (req.method !== 'GET') {
     if (req.method !== 'OPTIONS' && req.method !== 'HEAD') {
