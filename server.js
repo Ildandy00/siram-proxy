@@ -129,10 +129,10 @@ function separaSegnalazione(r) {
   let note = String(r[6] || '').replace(/\s*\|?\s*🔄\s*Riaperto il[^|]*/g, '').trim();
   let segnalazione = String(r[17] || '').trim();
   if (!segnalazione) {
-    const m = note.match(/^(FMP|SIE4|RdI)\s*#\s*([\w\-\/]+)\s*\|?\s*(—\s*)?/);
+    const m = note.match(/^(FMP|SIE4|RdI)\s*#\s*\*?([\w\-\/]+)\s*\|?\s*(—\s*)?/);
     if (m) { segnalazione = m[1] + ' ' + m[2]; note = note.slice(m[0].length).trim(); }
   } else {
-    note = note.replace(/^(FMP|SIE4|RdI)\s*#\s*[\w\-\/]+\s*\|?\s*(—\s*)?/, '').trim();
+    note = note.replace(/^(FMP|SIE4|RdI)\s*#\s*\*?[\w\-\/]+\s*\|?\s*(—\s*)?/, '').trim();
   }
   return { segnalazione, note };
 }
