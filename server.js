@@ -103,9 +103,42 @@ async function leggi(sheets, foglio) {
   return r.data.values || [];
 }
 
+// Data del foglio -> 'AAAA-MM-GG'. Il foglio e' in italiano: '04/11/2026' e '04/11/2026, 08:12'
+// sono GIORNO/MESE (new Date() li leggeva come mese/giorno: 4 novembre diventava 11 aprile,
+// e dal 13 del mese in poi la data risultava non valida).
 function fmtData(val) {
-  if (!val) return '';
-  try { const d = new Date(val); if (isNaN(d.getTime())) return ''; return d.toISOString().slice(0,10); } catch(e) { return ''; }
+  if (val === null || val === undefined || val === '') return '';
+  const s = String(val).trim();
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
+  m = s.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})/);
+  if (m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+  if (/^\d{5}(\.\d+)?$/.test(s)) {   // numero di serie di Fogli (giorni dal 30/12/1899)
+    return new Date(Date.UTC(1899, 11, 30) + Math.floor(Number(s)) * 86400000).toISOString().slice(0,10);
+  }
+  try { const d = new Date(s); if (isNaN(d.getTime())) return ''; return d.toISOString().slice(0,10); } catch(e) { return ''; }
+}
+// Ora italiana (Render gira in UTC)
+function oraItalia() {
+  return new Date().toLocaleString('it-IT', { timeZone:'Europe/Rome', day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' });
+}
+// Riferimento della segnalazione (colonna R, es. "FMP 18783") separato dalle note.
+// Le righe vecchie lo hanno ancora in testa alla nota ("FMP #18783 | — ..."): lo si sposta qui
+// solo in lettura. Si tolgono anche i vecchi "| 🔄 Riaperto il ...".
+function separaSegnalazione(r) {
+  let note = String(r[6] || '').replace(/\s*\|?\s*🔄\s*Riaperto il[^|]*/g, '').trim();
+  let segnalazione = String(r[17] || '').trim();
+  if (!segnalazione) {
+    const m = note.match(/^(FMP|SIE4|RdI)\s*#\s*([\w\-\/]+)\s*\|?\s*(—\s*)?/);
+    if (m) { segnalazione = m[1] + ' ' + m[2]; note = note.slice(m[0].length).trim(); }
+  } else {
+    note = note.replace(/^(FMP|SIE4|RdI)\s*#\s*[\w\-\/]+\s*\|?\s*(—\s*)?/, '').trim();
+  }
+  return { segnalazione, note };
+}
+function rigaIntervento(r) {
+  const s = separaSegnalazione(r);
+  return { id:r[0]||'', codiceImpianto:r[1]||'', dataPrevista:fmtData(r[2]), operaio:r[3]||'', tipoVisita:r[4]||'', stato:r[5]||'', note:s.note, dataChiusura:fmtData(r[7]), creatoIl:fmtData(r[8]), secondoOperaio:r[9]||'', interventoCollegato:r[10]||'', linkDrive:r[11]||'', dataFine:fmtData(r[12]), operaioSecondario2:r[13]||'', notaChiusura:r[14]||'', noteResponsabile:r[15]||'', oreImpiegate:r[16]||'', segnalazione:s.segnalazione };
 }
 function fmtDateTime(val) {
   if (!val) return '';
@@ -143,7 +176,7 @@ app.get('/dati', async (req, res) => {
     ]);
     const impianti   = rImp.slice(1).filter(r=>r[0]).map(r=>({ codice:r[0]||'', descrizione:r[1]||'', comune:r[2]||'', indirizzo:r[3]||'', operaioDefault:r[4]||'' }));
     const catalogo   = rCat.slice(1).filter(r=>r[0]).map(r=>({ codiceImpianto:r[0]||'', tipoVisita:r[1]||'', attivita:r[2]||'', ordine:Number(r[3])||0, obbligatoria:r[4]||'SI' }));
-    const interventi = rInt.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', codiceImpianto:r[1]||'', dataPrevista:fmtData(r[2]), operaio:r[3]||'', tipoVisita:r[4]||'', stato:r[5]||'', note:r[6]||'', dataChiusura:fmtData(r[7]), creatoIl:fmtData(r[8]), secondoOperaio:r[9]||'', interventoCollegato:r[10]||'', linkDrive:r[11]||'', dataFine:fmtData(r[12]), operaioSecondario2:r[13]||'', notaChiusura:r[14]||'', noteResponsabile:r[15]||'', oreImpiegate:r[16]||'' }));
+    const interventi = rInt.slice(1).filter(r=>r[0]).map(rigaIntervento);
     const checklist  = rChk.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', idIntervento:r[1]||'', attivita:r[2]||'', eseguita:r[3]||'NO', oraCompletamento:fmtDateTime(r[4]), note:r[5]||'', extra:r[6]||'NO' }));
     res.json({ impianti, catalogo, interventi, checklist });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
@@ -206,20 +239,22 @@ app.post('/aggiorna-intervento', async (req, res) => {
     const { id, stato, operaio } = req.body;
     const sheets = await getSheets();
     const rows   = await leggi(sheets, SH.INTERVENTI);
-    const ora    = stato === 'Chiuso' ? new Date().toLocaleString('it-IT', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }) : '';
+    const ora    = stato === 'Chiuso' ? oraItalia() : '';
 
+    // Si tocca la riga solo se lo stato CAMBIA: il "Salva" del responsabile rimanda sempre lo stato,
+    // e prima ogni salvataggio spostava la data di chiusura ad oggi (righe gia' chiuse)
+    // o aggiungeva un "Riaperto il" alla nota (righe aperte). Niente piu' "Riaperto" nella nota.
     async function aggiornaRiga(rigaId) {
+      if (!stato) return;
       const i = rows.findIndex((r,idx) => idx > 0 && r[0] === rigaId);
       if (i < 1) return;
+      const statoPrima = String(rows[i][5] || '');
+      if (statoPrima === stato) return;
       await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!F${i+1}`, valueInputOption: 'RAW', requestBody: { values: [[stato]] } });
       if (stato === 'Chiuso') {
         await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!H${i+1}`, valueInputOption: 'RAW', requestBody: { values: [[ora]] } });
-      }
-      if (stato === 'Aperto') {
-        const notaAttuale = rows[i][6] || '';
-        const dataRiapertura = new Date().toLocaleString('it-IT', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' });
-        const notaAggiornata = notaAttuale ? notaAttuale + ` | 🔄 Riaperto il ${dataRiapertura}` : `🔄 Riaperto il ${dataRiapertura}`;
-        await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!G${i+1}:H${i+1}`, valueInputOption: 'RAW', requestBody: { values: [[notaAggiornata, '']] } });
+      } else if (statoPrima === 'Chiuso') {
+        await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!H${i+1}`, valueInputOption: 'RAW', requestBody: { values: [['']] } });
       }
     }
 
@@ -289,7 +324,7 @@ app.get('/dati-responsabile', async (req, res) => {
     ]);
     const impianti   = rImp.slice(1).filter(r=>r[0]).map(r=>({ codice:r[0]||'', descrizione:r[1]||'', comune:r[2]||'', indirizzo:r[3]||'', operaioDefault:r[4]||'' }));
     const catalogo   = rCat.slice(1).filter(r=>r[0]).map(r=>({ codiceImpianto:r[0]||'', tipoVisita:r[1]||'', attivita:r[2]||'', ordine:Number(r[3])||0, obbligatoria:r[4]||'SI' }));
-    const interventi = rInt.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', codiceImpianto:r[1]||'', dataPrevista:fmtData(r[2]), operaio:r[3]||'', tipoVisita:r[4]||'', stato:r[5]||'', note:r[6]||'', dataChiusura:fmtData(r[7]), creatoIl:fmtData(r[8]), secondoOperaio:r[9]||'', interventoCollegato:r[10]||'', linkDrive:r[11]||'', dataFine:fmtData(r[12]), operaioSecondario2:r[13]||'', notaChiusura:r[14]||'', noteResponsabile:r[15]||'', oreImpiegate:r[16]||'' }));
+    const interventi = rInt.slice(1).filter(r=>r[0]).map(rigaIntervento);
     const checklist  = rChk.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', idIntervento:r[1]||'', attivita:r[2]||'', eseguita:r[3]||'NO', oraCompletamento:fmtDateTime(r[4]), note:r[5]||'', extra:r[6]||'NO' }));
     const assenze    = rAss.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', operaio:r[1]||'', dataInizio:fmtData(r[2]), dataFine:fmtData(r[3]), tipo:r[4]||'', note:r[5]||'' }));
     // Pratiche v2 — stato calcolato dai dati (vedi pratiche.js)
@@ -390,7 +425,9 @@ app.post('/elimina-assenza', async (req, res) => {
 
 app.post('/notifica-fmp', async (req, res) => {
   try {
-    const { operaio, codiceImpianto, note, id } = req.body;
+    const { operaio, codiceImpianto, id } = req.body;
+    const note = (req.body.segnalazione ? req.body.segnalazione + ' · ' : '') + String(req.body.note || '');
+    const titolo = req.body.titolo || '🚨 Nuova segnalazione FMP';
     const sheets = await getSheets();
     const rImp   = await leggi(sheets, SH.IMPIANTI);
     const impRow = rImp.slice(1).find(r=>r[0]===codiceImpianto);
@@ -399,7 +436,7 @@ app.post('/notifica-fmp', async (req, res) => {
     // operaio di default), avvisa tutti e 4 così qualcuno la prende in carico.
     const inContenitore = !operaio || operaio.toString().trim() === '' || operaio.toString().trim() === 'DaAssegnare';
     const destinatari = inContenitore ? ['Matteo', 'Stefano', 'Michele', 'Ezio', 'Aziz'] : [operaio];
-    await pushNotifica(sheets, destinatari, '🚨 Nuova segnalazione FMP', `${nome} — ${note.slice(0,80)}`);
+    await pushNotifica(sheets, destinatari, titolo, `${nome} — ${note.slice(0,80)}`);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
 });
