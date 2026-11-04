@@ -279,7 +279,7 @@ function separaSegnalazione(r) {
 }
 function rigaIntervento(r) {
   const s = separaSegnalazione(r);
-  return { id:r[0]||'', codiceImpianto:r[1]||'', dataPrevista:fmtData(r[2]), operaio:r[3]||'', tipoVisita:r[4]||'', stato:r[5]||'', note:s.note, dataChiusura:fmtData(r[7]), creatoIl:fmtData(r[8]), secondoOperaio:r[9]||'', interventoCollegato:r[10]||'', linkDrive:r[11]||'', dataFine:fmtData(r[12]), operaioSecondario2:r[13]||'', notaChiusura:r[14]||'', noteResponsabile:r[15]||'', oreImpiegate:r[16]||'', segnalazione:s.segnalazione };
+  return { id:r[0]||'', codiceImpianto:r[1]||'', dataPrevista:fmtData(r[2]), operaio:r[3]||'', tipoVisita:r[4]||'', stato:r[5]||'', note:s.note, dataChiusura:fmtData(r[7]), creatoIl:fmtData(r[8]), secondoOperaio:r[9]||'', interventoCollegato:r[10]||'', linkDrive:r[11]||'', dataFine:fmtData(r[12]), operaioSecondario2:r[13]||'', notaChiusura:r[14]||'', noteResponsabile:r[15]||'', oreImpiegate:r[16]||'', segnalazione:s.segnalazione, fattoAlle:r[18]||'' };
 }
 function fmtDateTime(val) {
   if (!val) return '';
@@ -375,6 +375,58 @@ async function assicuraColonnaOre(sheets, rows) {
   colonnaOreOk = true;
 }
 
+// ------------------------------------------------------------
+// Vista operaio con mappa (04/11/2026)
+// - "Fatto" a un tocco durante il turno: colonna S (FattoAlle) del foglio Interventi con
+//   l'ora in cui l'operaio l'ha segnato; la chiusura vera (nota + ore) si fa a fine giornata.
+// - Posizione dell'impianto sistemata dall'app ("Sono qui" o puntino trascinato): colonne
+//   F (Lat) e G (Lon) del foglio Impianti.
+// ------------------------------------------------------------
+const colonneOk = {};
+async function assicuraColonna(sheets, foglio, rows, indice, lettera, titolo) {
+  const chiave = foglio + lettera;
+  if (colonneOk[chiave]) return;
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID, fields: 'sheets.properties' });
+  const sh = meta.data.sheets.find(x => x.properties.title === foglio);
+  const attuali = (sh && sh.properties.gridProperties && sh.properties.gridProperties.columnCount) || 0;
+  if (sh && attuali < indice + 1) {
+    await sheets.spreadsheets.batchUpdate({ spreadsheetId: SHEET_ID, requestBody: { requests: [{ appendDimension: { sheetId: sh.properties.sheetId, dimension: 'COLUMNS', length: indice + 1 - attuali } }] } });
+  }
+  if (!(rows[0] && rows[0][indice])) {
+    await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${foglio}!${lettera}1`, valueInputOption: 'RAW', requestBody: { values: [[titolo]] } });
+  }
+  colonneOk[chiave] = true;
+}
+// body: { id, fattoAlle }  (fattoAlle vuoto = non piu' fatto)
+app.post('/segna-fatto', async (req, res) => {
+  try {
+    const { id } = req.body;
+    const fattoAlle = String(req.body.fattoAlle || '').trim();
+    if (!id) return res.status(400).json({ ok: false, errore: 'id mancante' });
+    const sheets = await getSheets();
+    const rows = await leggi(sheets, SH.INTERVENTI);
+    const i = rows.findIndex((r, idx) => idx > 0 && r[0] === id);
+    if (i < 1) return res.status(404).json({ ok: false, errore: 'Intervento non trovato' });
+    await assicuraColonna(sheets, SH.INTERVENTI, rows, 18, 'S', 'FattoAlle');
+    await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!S${i+1}`, valueInputOption: 'RAW', requestBody: { values: [[fattoAlle]] } });
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+// body: { codice, lat, lng }
+app.post('/imposta-coordinate', async (req, res) => {
+  try {
+    const codice = String(req.body.codice || '').trim();
+    const lat = coordFoglio(req.body.lat, 35, 48), lng = coordFoglio(req.body.lng, 6, 19);
+    if (!codice || lat == null || lng == null) return res.status(400).json({ ok: false, errore: 'Codice o coordinate non validi' });
+    const sheets = await getSheets();
+    const rows = await leggi(sheets, SH.IMPIANTI);
+    const i = rows.findIndex((r, idx) => idx > 0 && String(r[0] || '').trim() === codice);
+    if (i < 1) return res.status(404).json({ ok: false, errore: 'Impianto non trovato' });
+    await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.IMPIANTI}!F${i+1}:G${i+1}`, valueInputOption: 'RAW', requestBody: { values: [[String(lat), String(lng)]] } });
+    res.json({ ok: true, lat, lng });
+  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
+});
+
 app.post('/aggiorna-intervento', async (req, res) => {
   try {
     const { id, stato, operaio } = req.body;
@@ -396,6 +448,8 @@ app.post('/aggiorna-intervento', async (req, res) => {
         await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!H${i+1}`, valueInputOption: 'RAW', requestBody: { values: [[ora]] } });
       } else if (statoPrima === 'Chiuso') {
         await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!H${i+1}`, valueInputOption: 'RAW', requestBody: { values: [['']] } });
+        // riaperta: non e' piu' "fatta, da chiudere"
+        if (rows[i][18]) await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.INTERVENTI}!S${i+1}`, valueInputOption: 'RAW', requestBody: { values: [['']] } });
       }
     }
 
