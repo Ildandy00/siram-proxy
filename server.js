@@ -98,6 +98,22 @@ app.use(cors());
 app.use(express.json());
 app.get('/', (req, res) => res.json({ ok: true, service: 'Siram Proxy' }));
 
+// Riga del foglio Impianti -> oggetto. Colonne F (Lat) e G (Lon): coordinate
+// per la mappa dell'app; si accettano col punto o con la virgola, e solo se
+// cadono in Italia (altrimenti vuote, cosi' un errore di battitura non sposta il puntino).
+function coordFoglio(v, min, max) {
+  const n = parseFloat(String(v == null ? '' : v).trim().replace(',', '.'));
+  return (isFinite(n) && n >= min && n <= max) ? n : null;
+}
+function impiantoDaRiga(r) {
+  const lat = coordFoglio(r[5], 35, 48), lng = coordFoglio(r[6], 6, 19);
+  return {
+    codice: r[0] || '', descrizione: r[1] || '', comune: r[2] || '', indirizzo: r[3] || '', operaioDefault: r[4] || '',
+    lat: (lat != null && lng != null) ? lat : null,
+    lng: (lat != null && lng != null) ? lng : null,
+  };
+}
+
 async function leggi(sheets, foglio) {
   const r = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: foglio });
   return r.data.values || [];
@@ -174,7 +190,7 @@ app.get('/dati', async (req, res) => {
       leggi(sheets, SH.IMPIANTI), leggi(sheets, SH.CATALOGO),
       leggi(sheets, SH.INTERVENTI), leggi(sheets, SH.CHECKLIST),
     ]);
-    const impianti   = rImp.slice(1).filter(r=>r[0]).map(r=>({ codice:r[0]||'', descrizione:r[1]||'', comune:r[2]||'', indirizzo:r[3]||'', operaioDefault:r[4]||'' }));
+    const impianti   = rImp.slice(1).filter(r=>r[0]).map(impiantoDaRiga);
     const catalogo   = rCat.slice(1).filter(r=>r[0]).map(r=>({ codiceImpianto:r[0]||'', tipoVisita:r[1]||'', attivita:r[2]||'', ordine:Number(r[3])||0, obbligatoria:r[4]||'SI' }));
     const interventi = rInt.slice(1).filter(r=>r[0]).map(rigaIntervento);
     const checklist  = rChk.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', idIntervento:r[1]||'', attivita:r[2]||'', eseguita:r[3]||'NO', oraCompletamento:fmtDateTime(r[4]), note:r[5]||'', extra:r[6]||'NO' }));
@@ -322,7 +338,7 @@ app.get('/dati-responsabile', async (req, res) => {
       leggi(sheets, SH.INTERVENTI), leggi(sheets, SH.CHECKLIST),
       leggi(sheets, SH.ASSENZE).catch(() => [[]]),
     ]);
-    const impianti   = rImp.slice(1).filter(r=>r[0]).map(r=>({ codice:r[0]||'', descrizione:r[1]||'', comune:r[2]||'', indirizzo:r[3]||'', operaioDefault:r[4]||'' }));
+    const impianti   = rImp.slice(1).filter(r=>r[0]).map(impiantoDaRiga);
     const catalogo   = rCat.slice(1).filter(r=>r[0]).map(r=>({ codiceImpianto:r[0]||'', tipoVisita:r[1]||'', attivita:r[2]||'', ordine:Number(r[3])||0, obbligatoria:r[4]||'SI' }));
     const interventi = rInt.slice(1).filter(r=>r[0]).map(rigaIntervento);
     const checklist  = rChk.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', idIntervento:r[1]||'', attivita:r[2]||'', eseguita:r[3]||'NO', oraCompletamento:fmtDateTime(r[4]), note:r[5]||'', extra:r[6]||'NO' }));
