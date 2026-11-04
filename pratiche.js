@@ -163,7 +163,7 @@ function calcolaStato(p, offerteP, interventi) {
 }
 
 module.exports = function montaPratiche(app, deps) {
-  const { getSheets, leggi, SHEET_ID, SH, getSheetId } = deps;
+  const { getSheets, leggi, seManca, SHEET_ID, SH, getSheetId } = deps;
   const ADDON_TOKEN = process.env.ADDON_TOKEN || '';
   let intestazioniOk = false;
 
@@ -186,8 +186,8 @@ module.exports = function montaPratiche(app, deps) {
     await assicuraColonne(sheets, SH.PRATICHE, HEAD_PRATICHE.length);
     await assicuraColonne(sheets, SH.OFFERTE, HEAD_OFFERTE.length);
     const [rp, ro] = await Promise.all([
-      sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${SH.PRATICHE}!A1:${ULTIMA_COL_PRA}1` }).catch(() => ({ data: {} })),
-      sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${SH.OFFERTE}!A1:${ULTIMA_COL_OFF}1` }).catch(() => ({ data: {} })),
+      sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${SH.PRATICHE}!A1:${ULTIMA_COL_PRA}1` }).catch(seManca({ data: {} })),
+      sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${SH.OFFERTE}!A1:${ULTIMA_COL_OFF}1` }).catch(seManca({ data: {} })),
     ]);
     const hp = (rp.data.values && rp.data.values[0]) || [];
     const ho = (ro.data.values && ro.data.values[0]) || [];
@@ -203,9 +203,9 @@ module.exports = function montaPratiche(app, deps) {
   async function caricaTutto(sheets) {
     await assicuraIntestazioni(sheets);
     const [rPra, rOff, rInt] = await Promise.all([
-      leggi(sheets, SH.PRATICHE).catch(() => [[]]),
-      leggi(sheets, SH.OFFERTE).catch(() => [[]]),
-      leggi(sheets, SH.INTERVENTI).catch(() => [[]]),
+      leggi(sheets, SH.PRATICHE).catch(seManca([[]])),
+      leggi(sheets, SH.OFFERTE).catch(seManca([[]])),
+      leggi(sheets, SH.INTERVENTI).catch(seManca([[]])),
     ]);
     const interventi = rInt.slice(1).filter(r => r[0]).map(r => ({ id: r[0] || '', note: r[6] || '', stato: r[5] || '' }));
     const offerte = rOff.slice(1).map((r, i) => ({ r, riga: i + 2 })).filter(x => x.r[0]).map(x => Object.assign(rigaAOfferta(x.r), { _riga: x.riga }));

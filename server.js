@@ -96,6 +96,55 @@ async function getSheets() { const auth = getAuth(); return google.sheets({ vers
 
 app.use(cors());
 app.use(express.json());
+
+// ------------------------------------------------------------
+// Copia delle letture del foglio (04/11/2026). Google concede all'account del server 60 letture
+// al minuto; ogni pagina Responsabile aperta ne fa ~16 al minuto (si aggiorna ogni 60 s). Con piu'
+// pagine aperte Google rifiutava ("Quota exceeded") e la pagina si svuotava.
+// - Le GET in GET_CON_COPIA rispondono dalla copia se ha meno di COPIA_MS; ogni scrittura del
+//   gestionale (POST) la butta via, cosi' chi scrive vede subito il dato nuovo.
+// - Se la lettura fallisce si risponde con l'ultima risposta buona (fino a COPIA_VECCHIA_MS),
+//   con l'intestazione X-Dati-Del = ora di quella lettura: la pagina avvisa che non e' aggiornata.
+// Le rotte di /orari e /analisi sono montate prima e non passano di qui.
+// ------------------------------------------------------------
+const COPIA_MS = 45 * 1000;
+const COPIA_VECCHIA_MS = 6 * 60 * 60 * 1000;
+const GET_CON_COPIA = new Set(['/dati', '/dati-responsabile', '/impianti-operaio', '/rdacat', '/reperibile',
+  '/note-giorno', '/scadenze-rcee', '/pratiche', '/config-letture', '/letture-dati']);
+const copie = new Map();    // url -> { quando, corpo }  copia fresca, si butta a ogni scrittura
+const buone = new Map();    // url -> { quando, corpo }  ultima risposta buona, solo per gli errori
+let generazione = 0;        // cambia a ogni scrittura: una lettura partita prima non si salva
+app.use((req, res, next) => {
+  if (req.method !== 'GET') {
+    if (req.method !== 'OPTIONS' && req.method !== 'HEAD') {
+      generazione++; copie.clear();
+      res.on('finish', () => { generazione++; copie.clear(); });
+    }
+    return next();
+  }
+  if (!GET_CON_COPIA.has(req.path)) return next();
+  const chiave = req.originalUrl;
+  res.set('Access-Control-Expose-Headers', 'X-Dati-Del');
+  const c = copie.get(chiave);
+  if (c && Date.now() - c.quando < COPIA_MS) return res.json(c.corpo);
+  const gen = generazione;
+  const json = res.json.bind(res);
+  res.json = (corpo) => {
+    if (res.statusCode < 400) {
+      if (gen === generazione) copie.set(chiave, { quando: Date.now(), corpo });
+      buone.set(chiave, { quando: Date.now(), corpo });
+      return json(corpo);
+    }
+    const b = buone.get(chiave);
+    if (b && Date.now() - b.quando < COPIA_VECCHIA_MS) {
+      console.warn(`[copia] ${chiave}: lettura fallita (${(corpo && corpo.errore) || res.statusCode}), risposta del ${new Date(b.quando).toISOString()}`);
+      res.status(200).set('X-Dati-Del', new Date(b.quando).toISOString());
+      return json(b.corpo);
+    }
+    return json(corpo);
+  };
+  next();
+});
 app.get('/', (req, res) => res.json({ ok: true, service: 'Siram Proxy' }));
 
 // Riga del foglio Impianti -> oggetto. Colonne F (Lat) e G (Lon): coordinate
@@ -117,6 +166,13 @@ function impiantoDaRiga(r) {
 async function leggi(sheets, foglio) {
   const r = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: foglio });
   return r.data.values || [];
+}
+
+// Per i .catch delle letture: un foglio che non esiste ancora vale 'vuoto', ogni altro errore
+// (es. Google che rifiuta per troppe letture) arriva a chi chiama. Prima ogni errore diventava un
+// foglio vuoto: la pagina mostrava tutto sparito e le scritture lavoravano su righe vuote (04/11/2026).
+function seManca(vuoto) {
+  return (e) => { if (/Unable to parse range/i.test(String(e && e.message))) return vuoto; throw e; };
 }
 
 // Data del foglio -> 'AAAA-MM-GG'. Il foglio e' in italiano: '04/11/2026' e '04/11/2026, 08:12'
@@ -172,7 +228,7 @@ app.post('/registra-push', async (req, res) => {
     const tipo = fcmToken ? 'fcm' : 'web';
 
     const sheets = await getSheets();
-    const rows   = await leggi(sheets, SH.PUSHTOKENS).catch(() => []);
+    const rows   = await leggi(sheets, SH.PUSHTOKENS).catch(seManca([]));
     const idx = rows.findIndex((r,i) => i > 0 && r[0] === operaio);
     if (idx > 0) {
       await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.PUSHTOKENS}!A${idx+1}:C${idx+1}`, valueInputOption: 'RAW', requestBody: { values: [[operaio, dato, tipo]] } });
@@ -336,7 +392,7 @@ app.get('/dati-responsabile', async (req, res) => {
     const [rImp, rCat, rInt, rChk, rAss] = await Promise.all([
       leggi(sheets, SH.IMPIANTI), leggi(sheets, SH.CATALOGO),
       leggi(sheets, SH.INTERVENTI), leggi(sheets, SH.CHECKLIST),
-      leggi(sheets, SH.ASSENZE).catch(() => [[]]),
+      leggi(sheets, SH.ASSENZE).catch(seManca([[]])),
     ]);
     const impianti   = rImp.slice(1).filter(r=>r[0]).map(impiantoDaRiga);
     const catalogo   = rCat.slice(1).filter(r=>r[0]).map(r=>({ codiceImpianto:r[0]||'', tipoVisita:r[1]||'', attivita:r[2]||'', ordine:Number(r[3])||0, obbligatoria:r[4]||'SI' }));
@@ -526,7 +582,7 @@ app.post('/elimina-catalogo', async (req, res) => {
 // ============================================================
 //  PRATICHE v2 — vedi pratiche.js (endpoint /pratiche, /pratica/*, /addon/*)
 // ============================================================
-const pratiche = require('./pratiche')(app, { getSheets, leggi, SHEET_ID, SH, getSheetId });
+const pratiche = require('./pratiche')(app, { getSheets, leggi, seManca, SHEET_ID, SH, getSheetId });
 
 // ============================================================
 //  GET /rdacat / POST /crea-rdacat / POST /aggiorna-rdacat / POST /elimina-rdacat
@@ -534,7 +590,7 @@ const pratiche = require('./pratiche')(app, { getSheets, leggi, SHEET_ID, SH, ge
 app.get('/rdacat', async (req, res) => {
   try {
     const sheets = await getSheets();
-    const rows   = await leggi(sheets, SH.RDACAT).catch(() => []);
+    const rows   = await leggi(sheets, SH.RDACAT).catch(seManca([]));
     const richieste = rows.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', idIntervento:r[1]||'', codiceImpianto:r[2]||'', tipologia:r[3]||'', nota:r[4]||'', operaio:r[5]||'', stato:r[6]||'Inviata', creatoIl:r[7]||'', aggiornatoIl:r[8]||'' }));
     res.json({ richieste });
   } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
@@ -604,7 +660,7 @@ function turniReperibilita(rows) {
 app.get('/reperibile', async (req, res) => {
   try {
     const sheets = await getSheets();
-    const rows   = await leggi(sheets, SH.REPERIBILITA).catch(() => []);
+    const rows   = await leggi(sheets, SH.REPERIBILITA).catch(seManca([]));
     const turni  = turniReperibilita(rows);
     const oggiIso = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Rome' });
     const oggi    = new Date(oggiIso + 'T12:00:00');
@@ -630,7 +686,7 @@ async function scriviReperibile(dataInizio, dataFine, operaio) {
   if (!ini) throw new Error('Data di inizio non valida');
   const fin = normData(dataFine) || piuGiorni(ini, 6);
   const sheets = await getSheets();
-  const rows   = await leggi(sheets, SH.REPERIBILITA).catch(() => []);
+  const rows   = await leggi(sheets, SH.REPERIBILITA).catch(seManca([]));
   if (!rows.length) {
     await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: SH.REPERIBILITA + '!A1:C1',
       valueInputOption: 'RAW', requestBody: { values: [['Data Lunedì', 'Operaio', 'Data fine']] } });
@@ -706,6 +762,7 @@ const NOTE_COLONNE = ['ID', 'Data', 'Testo', 'Destinatari', 'Creato', 'Letto da'
 async function noteFoglio(sheets) {
   try { return await leggi(sheets, SH.NOTEGIORNO); }
   catch (e) {
+    if (!/Unable to parse range/i.test(String(e && e.message))) throw e;   // si crea solo se manca davvero
     await sheets.spreadsheets.batchUpdate({ spreadsheetId: SHEET_ID,
       requestBody: { requests: [{ addSheet: { properties: { title: SH.NOTEGIORNO } } }] } });
     await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: SH.NOTEGIORNO + '!A1',
@@ -1161,8 +1218,8 @@ app.get('/letture-dati', async (req, res) => {
   try {
     const sheets = await getSheets();
     const [rCon, rLet, cfg] = await Promise.all([
-      leggi(sheets, SH.CONTATORI).catch(() => []),
-      leggi(sheets, SH.LETTURE).catch(() => []),
+      leggi(sheets, SH.CONTATORI).catch(seManca([])),
+      leggi(sheets, SH.LETTURE).catch(seManca([])),
       configLetture(sheets),
     ]);
 
@@ -1252,7 +1309,7 @@ app.post('/salva-lettura', async (req, res) => {
         errore: 'Le letture sono aperte solo nei giorni ' + cfg.giorni.join(', ') + ' del mese' });
     }
 
-    const rCon = await leggi(sheets, SH.CONTATORI).catch(() => []);
+    const rCon = await leggi(sheets, SH.CONTATORI).catch(seManca([]));
     if (rCon.length < 2) return res.json({ ok: false, errore: 'Foglio Contatori vuoto' });
     const C = mappaColonne(rCon[0], COL_CONTATORI);
     const g = (r, i) => (i >= 0 && r[i] !== undefined && r[i] !== null) ? r[i].toString().trim() : '';
@@ -1260,7 +1317,7 @@ app.post('/salva-lettura', async (req, res) => {
     const riga = rCon.slice(1).find(r => g(r, C.id) === idContatore);
     if (!riga) return res.json({ ok: false, errore: 'Contatore non trovato: ' + idContatore });
 
-    const rLet = await leggi(sheets, SH.LETTURE).catch(() => []);
+    const rLet = await leggi(sheets, SH.LETTURE).catch(seManca([]));
     const mese = cfg.oggi.slice(0, 7);
 
     // Lettura precedente = ultima riga in Letture di un mese diverso,
@@ -1368,7 +1425,7 @@ app.get('/rigenera-stringhe', async (req, res) => {
       return res.json({ ok: false, errore: 'mese non valido: usa AAAA-MM oppure "tutti"' });
     }
 
-    const rLet = await leggi(sheets, SH.LETTURE).catch(() => []);
+    const rLet = await leggi(sheets, SH.LETTURE).catch(seManca([]));
     const dati = [];
     let esaminate = 0, senzaData = 0;
 
