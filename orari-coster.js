@@ -89,6 +89,31 @@ function optionalInt(v, lo, hi) {
   return { ok: true, value: n };
 }
 
+/** 08/11/2026: parametri dell'ottimizzatore Coster (centraline YLC880), come il pannello "Parametri ottimizzatore
+ *  invernale". [min, max, decimali]. Stessi limiti dell'agente, che comunque rivalida tutto. */
+const OTT_LIMITI = {
+  ABILITAZIONE: [0, 1, 0], FORZATURA: [0, 10, 1], DELTA_T_OFF: [0, 10, 1], MASSIMO_PRESPEGNIMENTO: [0, 24, 0],
+  MASSIMO_ANTICIPO_BREVE: [0, 24, 0], MASSIMO_ANTICIPO_LUNGO: [0, 48, 0], K_RAFFREDDAMENTO: [1, 500, 0],
+  INERZIA_ACCENSIONE: [0, 999, 0], IA_AUTOMATICA: [0, 1, 0],
+};
+function validateOttimizzatore(raw) {
+  if (!raw || typeof raw !== 'object') throw new Error('Dati dell\'ottimizzatore mancanti.');
+  const indice = Number(raw.indice);
+  if (!isIntIn(indice, 0, 31)) throw new Error('Ottimizzatore non valido.');
+  const valori = {};
+  for (const [k, v] of Object.entries(raw.valori || {})) {
+    const lim = OTT_LIMITI[k];
+    if (!lim) throw new Error(`Parametro sconosciuto: ${k}.`);
+    const n = Number(String(v).replace(',', '.'));
+    if (!Number.isFinite(n) || n < lim[0] || n > lim[1]) throw new Error(`${k}: valore fuori dai limiti (${lim[0]}…${lim[1]}).`);
+    const r = lim[2] ? Math.round(n * 10) / 10 : Math.round(n);
+    if (!lim[2] && r !== n) throw new Error(`${k}: serve un numero intero.`);
+    valori[k] = r;
+  }
+  if (!Object.keys(valori).length) throw new Error('Nessun parametro da cambiare.');
+  return { indice, valori };
+}
+
 /** Stesse regole dell'agente (che comunque rivalida tutto). */
 function validateChanges(raw, righe = MAX_ROWS, tMin = HARD_T_MIN, tMax = HARD_T_MAX) {
   const nRighe = Number.isInteger(righe) && righe > 0 && righe <= MAX_ROWS_ANY ? righe : MAX_ROWS;
@@ -574,6 +599,7 @@ module.exports = function mountOrariCoster(app) {
     };
     if (full) {
       out.modifiche = job.modifiche;
+      out.ottimizzatore = job.ottimizzatore || null;
       out.dati = job.dati;
       out.storia = job.storia;
     }
@@ -755,6 +781,7 @@ module.exports = function mountOrariCoster(app) {
         tipo: next.tipo,
         schedule_id: next.schedule_id,
         modifiche: next.modifiche,
+        ottimizzatore: next.ottimizzatore || null,
       };
     }
 
@@ -891,11 +918,21 @@ module.exports = function mountOrariCoster(app) {
   web.post('/jobs', (req, res) => {
     const { tipo, schedule_id: scheduleId, modifiche } = req.body || {};
 
-    if (!['lettura', 'modifica'].includes(tipo)) return res.status(400).json({ error: 'Tipo non valido.' });
+    if (!['lettura', 'modifica', 'ottimizzatore'].includes(tipo)) return res.status(400).json({ error: 'Tipo non valido.' });
     if (!state.catalog) return res.status(503).json({ error: 'Anagrafica non ancora disponibile.' });
 
-    const etichetta = labelFor(scheduleId);
+    let etichetta = labelFor(scheduleId);
     if (!etichetta) return res.status(400).json({ error: 'Schedule non presente in anagrafica.' });
+    // 08/11/2026: parametri dell'ottimizzatore (l'agente trova la centralina dallo schedule del circuito)
+    let ottimizzatore = null;
+    if (tipo === 'ottimizzatore') {
+      try {
+        ottimizzatore = validateOttimizzatore(req.body && req.body.ottimizzatore);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
+      etichetta = { ...etichetta, schedule: `${etichetta.schedule} · ottimizzatore ${ottimizzatore.indice}` };
+    }
 
     const active = [...state.jobs.values()].filter((j) => !FINAL_STATES.has(j.stato));
     if (active.length >= MAX_ACTIVE_JOBS) {
@@ -903,6 +940,10 @@ module.exports = function mountOrariCoster(app) {
     }
     if (tipo === 'modifica' && active.some((j) => String(j.schedule_id) === String(scheduleId) && j.tipo === 'modifica')) {
       return res.status(409).json({ error: 'C\'è già una modifica in corso su questo schedule.' });
+    }
+    if (tipo === 'ottimizzatore' && active.some((j) => String(j.schedule_id) === String(scheduleId) && j.tipo === 'ottimizzatore'
+        && j.ottimizzatore && j.ottimizzatore.indice === ottimizzatore.indice)) {
+      return res.status(409).json({ error: 'C\'è già una modifica in corso su questo ottimizzatore.' });
     }
 
     let changes = null;
@@ -921,6 +962,7 @@ module.exports = function mountOrariCoster(app) {
       schedule_id: scheduleId,
       etichetta,
       modifiche: changes,
+      ottimizzatore,
       stato: 'in_coda',
       messaggio: now - state.agent.lastSeen < AGENT_ONLINE_MS
         ? 'In coda: l\'agente la prende a breve.'
@@ -934,7 +976,8 @@ module.exports = function mountOrariCoster(app) {
       storia: [{ t: now, stato: 'in_coda', messaggio: '' }],
     };
     state.jobs.set(job.id, job);
-    console.log(`[orari] nuovo lavoro ${job.id} ${tipo} ${etichetta.impianto} / ${etichetta.schedule}`);
+    console.log(`[orari] nuovo lavoro ${job.id} ${tipo} ${etichetta.impianto} / ${etichetta.schedule}`
+      + (ottimizzatore ? ` ${JSON.stringify(ottimizzatore.valori)}` : ''));
     res.status(201).json(jobPublic(job));
   });
 
