@@ -562,6 +562,8 @@ module.exports = function mountOrariCoster(app) {
     spegnimentiHash: null,
     spegnimentiTime: null,
     spegOps: new Map(),     // op_id → { op_id, tipo:'crea'|'annulla'|'fine'|'cancella_estranea'|'riprova', ... }
+    // 09/11/2026: scelte della pagina sulle proposte lette dalle mail (scarta / rimetti / inviata), da consegnare al PC
+    mailOps: new Map(),     // op_id → { op_id, id, stato, creato }
     // Righe viste davvero su Coster nell'ultima lettura (schedule_id → n).
     // Alcune centraline espongono più righe di quelle previste dalla famiglia.
     righeViste: new Map(),
@@ -744,6 +746,7 @@ module.exports = function mountOrariCoster(app) {
     for (const opId of Array.isArray(body.ack_ops) ? body.ack_ops : []) {
       state.straOps.delete(String(opId));
       state.spegOps.delete(String(opId));
+      state.mailOps.delete(String(opId));
     }
     if (Array.isArray(body.straordinari)) {
       state.straordinari = body.straordinari.slice(0, 500);
@@ -790,6 +793,7 @@ module.exports = function mountOrariCoster(app) {
       job,
       need_straordinari: needStra,
       straordinari_ops: straOps,
+      mail_ops: [...state.mailOps.values()].sort((a, b) => a.creato - b.creato).slice(0, 20),
       need_spegnimenti: needSpeg,
       spegnimenti_ops: spegOps,
     });
@@ -802,6 +806,7 @@ module.exports = function mountOrariCoster(app) {
       return res.status(400).json({ error: 'Catalogo non valido.' });
     }
     state.catalog = catalog;
+    applicaMailOps();
     state.catalogHash = String(hash || '');
     state.catalogTime = Date.now();
     res.json({ ok: true });
@@ -1287,6 +1292,32 @@ module.exports = function mountOrariCoster(app) {
 
   // Toglie dall'elenco uno straordinario chiuso (non scritto, ripristinato,
   // annullato...): sul PC passa a "archiviato" e non si vede piu'.
+  // 09/11/2026: proposte di accensione lette dalle mail (scripts/mail_accensioni.py sul PC, nel catalogo come "mail").
+  // La pagina segna una proposta scartata, di nuovo da fare o inviata (dopo aver creato gli straordinari); il PC lo
+  // salva al poll dopo. Intanto il catalogo in memoria si aggiorna subito, cosi' la pagina lo vede.
+  const MAIL_STATI = new Set(['nuova', 'scartata', 'inviata']);
+  function applicaMailOps() {
+    const lista = state.catalog && state.catalog.mail && Array.isArray(state.catalog.mail.proposte)
+      ? state.catalog.mail.proposte : [];
+    for (const op of state.mailOps.values()) {
+      const p = lista.find((x) => x.id === op.id);
+      if (p) p.stato = op.stato;
+    }
+  }
+  web.post('/mail/:id/stato', (req, res) => {
+    const id = String(req.params.id || '').slice(0, 40);
+    const stato = String((req.body || {}).stato || '');
+    if (!MAIL_STATI.has(stato)) return res.status(400).json({ error: 'Stato non valido.' });
+    const lista = state.catalog && state.catalog.mail && Array.isArray(state.catalog.mail.proposte)
+      ? state.catalog.mail.proposte : [];
+    if (!lista.some((x) => x.id === id)) return res.status(404).json({ error: 'Proposta non trovata.' });
+    for (const [opId, op] of state.mailOps) if (op.id === id) state.mailOps.delete(opId);
+    const opId = `op${newId()}`;
+    state.mailOps.set(opId, { op_id: opId, id, stato, creato: Date.now() });
+    applicaMailOps();
+    res.json({ ok: true });
+  });
+
   web.post('/straordinari/:id/archivia', (req, res) => {
     const id = String(req.params.id);
     const item = state.straordinari.find((x) => x.id === id);
