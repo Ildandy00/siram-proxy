@@ -17,7 +17,6 @@ const SH = {
   PUSHTOKENS:  'PushTokens',
   PRATICHE:    'Pratiche',
   OFFERTE:     'Offerte',
-  RDACAT:      'RdaCat',
   REPERIBILITA:'Reperibilita',
   PRESENZE:    'Presenze',
   ASSEGNAZIONE:'Assegnazione',
@@ -141,7 +140,7 @@ app.use(express.json());
 // ------------------------------------------------------------
 const COPIA_MS = 45 * 1000;
 const COPIA_VECCHIA_MS = 6 * 60 * 60 * 1000;
-const GET_CON_COPIA = new Set(['/dati', '/dati-responsabile', '/impianti-operaio', '/rdacat', '/reperibile',
+const GET_CON_COPIA = new Set(['/dati', '/dati-responsabile', '/impianti-operaio', '/reperibile',
   '/note-giorno', '/scadenze-rcee', '/pratiche', '/config-letture', '/letture-dati']);
 const copie = new Map();    // url -> { quando, corpo }  copia fresca, si butta a ogni scrittura
 const buone = new Map();    // url -> { quando, corpo }  ultima risposta buona, solo per gli errori
@@ -706,55 +705,6 @@ app.post('/elimina-catalogo', async (req, res) => {
 //  PRATICHE v2 — vedi pratiche.js (endpoint /pratiche, /pratica/*, /addon/*)
 // ============================================================
 const pratiche = require('./pratiche')(app, { getSheets, leggi, seManca, SHEET_ID, SH, getSheetId });
-
-// ============================================================
-//  GET /rdacat / POST /crea-rdacat / POST /aggiorna-rdacat / POST /elimina-rdacat
-// ============================================================
-app.get('/rdacat', async (req, res) => {
-  try {
-    const sheets = await getSheets();
-    const rows   = await leggi(sheets, SH.RDACAT).catch(seManca([]));
-    const richieste = rows.slice(1).filter(r=>r[0]).map(r=>({ id:r[0]||'', idIntervento:r[1]||'', codiceImpianto:r[2]||'', tipologia:r[3]||'', nota:r[4]||'', operaio:r[5]||'', stato:r[6]||'Inviata', creatoIl:r[7]||'', aggiornatoIl:r[8]||'' }));
-    res.json({ richieste });
-  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
-});
-
-app.post('/crea-rdacat', async (req, res) => {
-  try {
-    const { idIntervento, codiceImpianto, tipologia, nota, operaio } = req.body;
-    const sheets = await getSheets();
-    const id     = 'RDA-' + Math.random().toString(36).substring(2,10).toUpperCase();
-    const oggi   = new Date().toLocaleDateString('it-IT');
-    await sheets.spreadsheets.values.append({ spreadsheetId: SHEET_ID, range: SH.RDACAT, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [[id, idIntervento, codiceImpianto, tipologia, nota, operaio, 'Inviata', oggi, '']] } });
-    res.json({ ok: true, id });
-  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
-});
-
-app.post('/aggiorna-rdacat', async (req, res) => {
-  try {
-    const { id, stato } = req.body;
-    const sheets = await getSheets();
-    const rows   = await leggi(sheets, SH.RDACAT);
-    const idx    = rows.findIndex((r,i)=>i>0&&r[0]===id);
-    if (idx < 1) return res.json({ ok: false, errore: 'RDA non trovata' });
-    const oggi = new Date().toLocaleDateString('it-IT');
-    await sheets.spreadsheets.values.update({ spreadsheetId: SHEET_ID, range: `${SH.RDACAT}!G${idx+1}:I${idx+1}`, valueInputOption: 'RAW', requestBody: { values: [[stato, rows[idx][7], oggi]] } });
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
-});
-
-app.post('/elimina-rdacat', async (req, res) => {
-  try {
-    const { id } = req.body;
-    const sheets = await getSheets();
-    const rows   = await leggi(sheets, SH.RDACAT);
-    const idx    = rows.findIndex((r,i)=>i>0&&r[0]===id);
-    if (idx > 0) {
-      await sheets.spreadsheets.batchUpdate({ spreadsheetId: SHEET_ID, requestBody: { requests: [{ deleteDimension: { range: { sheetId: await getSheetId(sheets, SH.RDACAT), dimension:'ROWS', startIndex:idx, endIndex:idx+1 } } }] } });
-    }
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ ok: false, errore: err.message }); }
-});
 
 // ============================================================
 //  REPERIBILITA
