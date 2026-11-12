@@ -5,6 +5,7 @@ const { google } = require('googleapis');
 const app  = express();
 const PORT = process.env.PORT || 3000;
 require('./orari-coster')(app);
+require('./segnalazioni-report')(app);
   
 const SHEET_ID = process.env.SHEET_ID || '1JsQz8FiUMFGjFQ5tuodgjexxe1hE8UE87ORFDi_geWE';
 
@@ -160,7 +161,7 @@ function pulisciRegistri() {
   while (lettureGoogle.length && lettureGoogle[0].t < limite) lettureGoogle.shift();
 }
 app.use((req, res, next) => {
-  if (req.method !== 'OPTIONS' && req.path !== '/stato-letture' && !/^\/(orari|analisi)\//.test(req.path)) {
+  if (req.method !== 'OPTIONS' && req.path !== '/stato-letture' && !/^\/(orari|analisi|segnalazioni)\//.test(req.path)) {
     richieste.push({ t: Date.now(), percorso: req.method + ' ' + req.path, da: provenienza(req) });
     if (richieste.length > 20000) richieste.splice(0, 5000);
   }
