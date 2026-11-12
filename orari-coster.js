@@ -1301,7 +1301,14 @@ module.exports = function mountOrariCoster(app) {
       ? state.catalog.mail.proposte : [];
     for (const op of state.mailOps.values()) {
       const p = lista.find((x) => x.id === op.id);
-      if (p) p.stato = op.stato;
+      if (!p) continue;
+      if (op.tipo === 'tabella') {
+        // 12/11/2026: "Scrivi su tabella" in attesa del PC: la pagina vede subito "in scrittura"
+        for (const i of op.indici) {
+          const q = (p.richieste || [])[i];
+          if (q) q.tabella_scritta = { esito: 'in_corso', codice: op.codice, nome: op.nome, data: op.data };
+        }
+      } else p.stato = op.stato;
     }
   }
   web.post('/mail/:id/stato', (req, res) => {
@@ -1311,9 +1318,49 @@ module.exports = function mountOrariCoster(app) {
     const lista = state.catalog && state.catalog.mail && Array.isArray(state.catalog.mail.proposte)
       ? state.catalog.mail.proposte : [];
     if (!lista.some((x) => x.id === id)) return res.status(404).json({ error: 'Proposta non trovata.' });
-    for (const [opId, op] of state.mailOps) if (op.id === id) state.mailOps.delete(opId);
+    for (const [opId, op] of state.mailOps) if (op.id === id && op.tipo !== 'tabella') state.mailOps.delete(opId);
     const opId = `op${newId()}`;
     state.mailOps.set(opId, { op_id: opId, id, stato, creato: Date.now() });
+    applicaMailOps();
+    res.json({ ok: true });
+  });
+
+  // 12/11/2026 (Davide: "va aggiornata anche la tabella di contabilita' con l'orario del cliente"): la pagina chiede di
+  // scrivere nel Calendario Termico l'orario chiesto dal cliente per una o piu' richieste di una mail. Il server non
+  // scrive niente: mette in coda il comando per il PC, che chiama la Web App del calendario e rimanda l'esito nelle
+  // proposte (campo tabella_scritta di ogni richiesta).
+  const ORA_RE = /^([01]\d|2[0-4]):[0-5]\d$/;
+  web.post('/mail/:id/tabella', (req, res) => {
+    const id = String(req.params.id || '').slice(0, 40);
+    const b = req.body || {};
+    const lista = state.catalog && state.catalog.mail && Array.isArray(state.catalog.mail.proposte)
+      ? state.catalog.mail.proposte : [];
+    const p = lista.find((x) => x.id === id);
+    if (!p) return res.status(404).json({ error: 'Proposta non trovata.' });
+    if (Date.now() - state.agent.lastSeen >= AGENT_ONLINE_MS) return res.status(503).json({ error: 'Il PC non è collegato: la tabella si scrive quando torna in linea. Riprova.' });
+    const indici = Array.isArray(b.indici) ? [...new Set(b.indici.map(Number))] : [];
+    if (!indici.length || indici.length > 6 || indici.some((i) => !Number.isInteger(i) || i < 0 || i >= (p.richieste || []).length)) {
+      return res.status(400).json({ error: 'Richiesta non valida.' });
+    }
+    const codice = String(b.codice || '').trim().slice(0, 30), nome = String(b.nome || '').trim().slice(0, 200);
+    const data = String(b.data || '');
+    if (!codice) return res.status(400).json({ error: 'Manca la riga del calendario.' });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) return res.status(400).json({ error: 'Giorno non valido.' });
+    const fasce = Array.isArray(b.fasce) ? b.fasce : [];
+    if (!fasce.length || fasce.length > 3) return res.status(400).json({ error: 'Servono da una a tre fasce.' });
+    for (const f of fasce) {
+      if (!Array.isArray(f) || !ORA_RE.test(String(f[0])) || !ORA_RE.test(String(f[1])) || String(f[1]) <= String(f[0])) {
+        return res.status(400).json({ error: 'Orario del cliente non valido o incompleto.' });
+      }
+    }
+    for (const op of state.mailOps.values()) {
+      if (op.tipo === 'tabella' && op.id === id && op.indici.some((i) => indici.includes(i))) {
+        return res.status(409).json({ error: 'Scrittura in tabella già in corso per questa richiesta.' });
+      }
+    }
+    const opId = `op${newId()}`;
+    state.mailOps.set(opId, { op_id: opId, tipo: 'tabella', id, indici, codice, nome, data,
+      fasce: fasce.map((f) => [String(f[0]), String(f[1])]), motivo: String(b.motivo || p.oggetto || '').slice(0, 200), creato: Date.now() });
     applicaMailOps();
     res.json({ ok: true });
   });
