@@ -1107,12 +1107,24 @@ module.exports = function mountOrariCoster(app) {
     const dates = [];
     for (let i = 0; i < giorni; i++) dates.push(isoOf(new Date(d1.getTime() + i * 86400000)));
 
+    // 12/11/2026 (Davide: due richieste lo stesso giorno su fasce separate, la seconda veniva rifiutata): dall'agente
+    // v1.16.4 il PC UNISCE la richiesta nuova allo straordinario che c'e' gia' quel giorno (un solo straordinario con
+    // tutte le fasce; se e' gia' scritto lo toglie e lo riscrive). Si rifiuta solo se il PC e' piu' vecchio, o se
+    // quello che c'e' e' in annullamento.
+    const vAgente = String(state.agent.version || '').split('.').map((n) => parseInt(n, 10) || 0);
+    const unisce = [1, 16, 4].reduce((r, n, i) => (r !== 0 ? r : (vAgente[i] || 0) - n), 0) >= 0;
+    const annullandi = new Set([...state.straOps.values()].filter((o) => o.tipo === 'annulla').map((o) => o.id));
+    const mioGiorno = state.straordinari.filter((x) => String(x.schedule_id) === String(scheduleId) && STRA_ACTIVE.has(x.stato));
+    const inAnnullo = dates.filter((d) => mioGiorno.some((x) => x.data === d && (x.annulla || annullandi.has(x.id))));
+    if (inAnnullo.length) {
+      return res.status(409).json({ error: `Lo straordinario del ${inAnnullo.join(', ')} su questo programma è in annullamento: riprova quando è stato tolto.` });
+    }
     const busy = new Set([
-      ...state.straordinari.filter((x) => String(x.schedule_id) === String(scheduleId) && STRA_ACTIVE.has(x.stato)).map((x) => x.data),
+      ...mioGiorno.map((x) => x.data),
       ...[...state.straOps.values()].filter((o) => o.tipo === 'crea' && String(o.schedule_id) === String(scheduleId)).map((o) => o.data),
     ]);
     const clash = dates.filter((d) => busy.has(d));
-    if (clash.length) {
+    if (clash.length && !unisce) {
       return res.status(409).json({ error: `Esiste già uno straordinario su questo schedule il ${clash.join(', ')}.` });
     }
 
@@ -1136,7 +1148,7 @@ module.exports = function mountOrariCoster(app) {
       return op.id;
     });
     console.log(`[orari] straordinari richiesti ${dates.join(',')} ${etichetta.impianto} / ${etichetta.schedule}: ${fasceText(clean)}`);
-    res.status(201).json({ ok: true, ids: created });
+    res.status(201).json({ ok: true, ids: created, uniti: clash });
   });
 
   web.post('/straordinari/:id/annulla', (req, res) => {
