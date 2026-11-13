@@ -97,7 +97,8 @@ module.exports = function segnalazioniReport(app) {
     const b = req.body || {};
     const id = testo(b.id, 40);
     if (!/^[A-Za-z0-9_-]{4,40}$/.test(id)) return res.status(400).json({ error: 'id intervento non valido' });
-    if (!VERDETTI.has(b.verdetto)) return res.status(400).json({ error: 'verdetto non valido' });
+    // 13/11/2026: il PC non manda piu' il verdetto (solo orari e foto); se c'e' deve essere uno di quelli noti
+    if (b.verdetto && !VERDETTI.has(b.verdetto)) return res.status(400).json({ error: 'verdetto non valido' });
     const immagini = [];
     for (const im of (Array.isArray(b.immagini) ? b.immagini : []).slice(0, MAX_IMMAGINI)) {
       const dati = String((im && im.base64) || '');
@@ -115,7 +116,7 @@ module.exports = function segnalazioniReport(app) {
       riferimento: testo(b.riferimento, 60),
       impianto: testo(b.impianto, 120),
       giorno: testo(b.giorno, 30),
-      verdetto: b.verdetto,
+      verdetto: b.verdetto || '',
       certezza: testo(b.certezza, 10),
       causa: testo(b.causa, 80),
       sintesi: testo(b.sintesi, 300),
