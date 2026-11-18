@@ -65,7 +65,11 @@ module.exports = function segnalazioniReport(app) {
 
   router.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (origin && (!origini.length || origini.includes(origin))) {
+    // 18/11/2026: le letture (indice, report, immagini) sono libere come /dati: le apre anche l'app
+    // degli operai, che nell'APK puo' avere un'origine diversa dal sito. Le rotte /agent restano col token.
+    if (req.method === 'GET' && !req.path.startsWith('/agent')) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    } else if (origin && (!origini.length || origini.includes(origin))) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
     }
