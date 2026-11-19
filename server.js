@@ -995,17 +995,31 @@ app.get('/scadenze-rcee', async (req, res) => {
     };
     const g = (r, i) => (i >= 0 && r[i] !== undefined) ? r[i] : '';
 
+    // 19/11/2026: prima si tenevano solo le righe OK / IN SCADENZA / SCADUTO e gli impianti
+    // con "MANCA ULT. CONTROLLO" o "ALIMENTAZIONE NON RICONOSCIUTA" (es. le Capitanerie di
+    // Porto) sparivano dal gestionale senza dirlo. Ora restano in elenco come
+    // 'MANCA CONTROLLO' / 'DATI MANCANTI'. Fuori solo i generatori "ESCLUSO (<12 kW)".
+    // Un impianto con piu' generatori prende la riga migliore: prima una con la scadenza.
+    const classifica = (testo) => {
+      const t = (testo || '').toString().trim().toUpperCase();
+      if (t === 'OK' || t === 'IN SCADENZA' || t === 'SCADUTO') return { stato: t, rango: 0 };
+      if (t.indexOf('ESCLUSO') === 0) return null;
+      if (t.indexOf('MANCA') === 0) return { stato: 'MANCA CONTROLLO', rango: 1 };
+      return { stato: 'DATI MANCANTI', rango: 2 };
+    };
     const perImpianto = {};
     for (let i = 1; i < rows.length; i++) {
       const r = rows[i];
       const cod  = (g(r, C.imp)  || '').toString().trim();
       const anag = (g(r, C.anag) || '').toString().trim();
       if (!cod && !anag) continue;
-      const stato = (g(r, C.stato) || '').toString().trim().toUpperCase();
-      if (!(stato === 'OK' || stato === 'IN SCADENZA' || stato === 'SCADUTO')) continue;
+      const statoFoglio = (g(r, C.stato) || '').toString().trim();
+      const cl = classifica(statoFoglio);
+      if (!cl) continue;
 
       const key = cod || ('ANAG:' + anag);
-      if (!perImpianto[key]) {
+      const prima = perImpianto[key];
+      if (!prima || cl.rango < prima._rango) {
         perImpianto[key] = {
           codiceImpianto: cod,
           codiceAnagrafica: anag,
@@ -1017,17 +1031,20 @@ app.get('/scadenze-rcee', async (req, res) => {
           dataUltimo: (g(r, C.ult) || '').toString().trim(),
           periodicita: (g(r, C.per) || '').toString().trim(),
           prossimaScadenza: (g(r, C.prox) || '').toString().trim(),
-          giorni: parseInt((g(r, C.giorni) || '').toString().replace(/[^\-0-9]/g, ''), 10),
-          stato: stato,
-          nGeneratori: 0,
+          giorni: cl.rango === 0 ? parseInt((g(r, C.giorni) || '').toString().replace(/[^\-0-9]/g, ''), 10) : NaN,
+          stato: cl.stato,
+          statoFoglio: statoFoglio,
+          nGeneratori: prima ? prima.nGeneratori : 0,
+          _rango: cl.rango,
         };
       }
       perImpianto[key].nGeneratori++;
     }
+    Object.values(perImpianto).forEach(s => { delete s._rango; });
 
     const scadenze = Object.values(perImpianto).sort((a, b) => {
-      const ga = isNaN(a.giorni) ? 1e9 : a.giorni;
-      const gb = isNaN(b.giorni) ? 1e9 : b.giorni;
+      const ga = Number.isFinite(a.giorni) ? a.giorni : 1e9;
+      const gb = Number.isFinite(b.giorni) ? b.giorni : 1e9;
       return ga - gb;
     });
 
