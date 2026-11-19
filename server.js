@@ -957,6 +957,126 @@ app.post('/nota-letta', async (req, res) => {
 app.get('/preventivi', (req, res) => res.json({ preventivi: [] }));
 app.post('/richiedi-preventivo', (req, res) => res.json({ ok: true, id: 'PREV-' + Math.random().toString(36).substring(2,10).toUpperCase() }));
 
+// ------------------------------------------------------------
+//  RCEE: pezzi comuni a lettura e scrittura del foglio "ScadenzeRCEE"
+// ------------------------------------------------------------
+const RCEE_FOGLIO = 'ScadenzeRCEE';
+// Giorni sotto i quali una scadenza e' "IN SCADENZA". Nel foglio ProssimaScadenza / GiorniMancanti /
+// Stato sono valori scritti dallo script del foglio (non formule), e la sua soglia da qui non si
+// vede: 60 e' una scelta nostra, vale solo finche' lo script non ricalcola la riga.
+const RCEE_GIORNI_IN_SCADENZA = 60;
+function rceeColonne(intestazione) {
+  const norm = (s) => (s || '').toString().toLowerCase()
+    .replace(/[àáâ]/g,'a').replace(/[èé]/g,'e').replace(/[ìí]/g,'i')
+    .replace(/[òó]/g,'o').replace(/[ùú]/g,'u').replace(/[^a-z0-9]/g,'');
+  const H = (intestazione || []).map(norm);
+  const find = (pred) => { for (let i=0;i<H.length;i++) if (pred(H[i])) return i; return -1; };
+  return {
+    targa:  find(h => h.indexOf('targat') >= 0),
+    imp:    find(h => h === 'codiceimpianto' || (h.indexOf('impianto')>=0 && h.indexOf('codice')>=0 && h.indexOf('potenza')<0)),
+    anag:   find(h => h.indexOf('anagrafica') >= 0),
+    desc:   find(h => h.indexOf('descrizione') >= 0),
+    comm:   find(h => h.indexOf('commessa') >= 0),
+    alim:   find(h => h.indexOf('alimentazione') >= 0),
+    pottot: find(h => h.indexOf('potenza')>=0 && h.indexOf('impianto')>=0),
+    ult:    find(h => h.indexOf('ultimo') >= 0),
+    per:    find(h => h.indexOf('periodic') >= 0),
+    prox:   find(h => h.indexOf('prossima')>=0 || h.indexOf('scadenza')>=0),
+    giorni: find(h => h.indexOf('giorni') >= 0),
+    stato:  find(h => h.indexOf('stato') >= 0),
+  };
+}
+function rceeCella(r, i) { return (i >= 0 && r[i] !== undefined) ? r[i] : ''; }
+// 'AAAA-MM-GG' -> giorni dal 1970 (solo calendario, niente ore); null se la data non esiste
+function rceeGiorno(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
+  if (!m) return null;
+  const t = Date.UTC(+m[1], +m[2] - 1, +m[3]);
+  const d = new Date(t);
+  if (d.getUTCFullYear() !== +m[1] || d.getUTCMonth() !== +m[2] - 1 || d.getUTCDate() !== +m[3]) return null;
+  return Math.round(t / 86400000);
+}
+function rceeOggi() { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Rome' }).format(new Date()); }
+// Stessa regola del foglio: scadenza = ultimo giorno del mese dell'ultimo controllo + periodicita' (anni).
+// Es. 04/07/2025 + 4 anni = 31/07/2029; 17/02/2026 + 2 = 29/02/2028.
+function rceeScadenza(isoUltimo, anni, isoOggi) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoUltimo);
+  const fine = Math.round(Date.UTC(+m[1] + anni, +m[2], 0) / 86400000);   // giorno 0 del mese dopo = fine mese
+  const giorni = fine - rceeGiorno(isoOggi);
+  const stato = giorni < 0 ? 'SCADUTO' : (giorni <= RCEE_GIORNI_IN_SCADENZA ? 'IN SCADENZA' : 'OK');
+  return { fine, giorni, stato };
+}
+const rceeSeriale = (giorno) => giorno + 25569;   // numero di Fogli: giorni dal 30/12/1899
+function rceeLettera(i) { let s = ''; i++; while (i > 0) { const r = (i - 1) % 26; s = String.fromCharCode(65 + r) + s; i = Math.floor((i - 1) / 26); } return s; }
+
+// ============================================================
+//  POST /aggiorna-rcee  { codiceImpianto, codiceAnagrafica, data: 'AAAA-MM-GG' }
+//  Scrive la data dell'ultimo controllo (colonna DataUltimoControllo) su tutte le righe
+//  dell'impianto (un RCEE = un impianto, una riga per generatore; non le "ESCLUSO").
+//  Dove la riga ha la periodicita' riscrive subito anche ProssimaScadenza, GiorniMancanti e
+//  Stato, cosi' il gestionale non aspetta lo script del foglio. Celle scritte come numeri-data
+//  col formato gg/mm/aaaa: non dipende dalla lingua del foglio.
+// ============================================================
+app.post('/aggiorna-rcee', async (req, res) => {
+  try {
+    const cod  = String((req.body && req.body.codiceImpianto) || '').trim();
+    const anag = String((req.body && req.body.codiceAnagrafica) || '').trim();
+    const data = String((req.body && req.body.data) || '').trim();
+    if (!cod && !anag) return res.status(400).json({ ok: false, errore: "manca il codice dell'impianto" });
+    const giorno = rceeGiorno(data);
+    const oggi = rceeOggi();
+    if (giorno === null) return res.status(400).json({ ok: false, errore: 'data non valida' });
+    if (giorno > rceeGiorno(oggi)) return res.status(400).json({ ok: false, errore: "la data dell'ultimo controllo non puo' essere nel futuro" });
+    if (giorno < rceeGiorno('2000-01-01')) return res.status(400).json({ ok: false, errore: 'data troppo vecchia' });
+
+    const sheets = await getSheets();
+    const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: RCEE_FOGLIO, valueRenderOption: 'FORMATTED_VALUE' });
+    const rows = resp.data.values || [];
+    const C = rceeColonne(rows[0]);
+    if (C.ult < 0) return res.status(500).json({ ok: false, errore: 'nel foglio ScadenzeRCEE non trovo la colonna DataUltimoControllo' });
+
+    const chiave = cod || ('ANAG:' + anag);
+    const righe = [];
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      const c = (rceeCella(r, C.imp) || '').toString().trim();
+      const a = (rceeCella(r, C.anag) || '').toString().trim();
+      if (!c && !a) continue;
+      if ((c || ('ANAG:' + a)) !== chiave) continue;
+      if ((rceeCella(r, C.stato) || '').toString().trim().toUpperCase().indexOf('ESCLUSO') === 0) continue;
+      righe.push(i);
+    }
+    if (!righe.length) return res.status(404).json({ ok: false, errore: 'impianto non trovato nel foglio ScadenzeRCEE' });
+
+    const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID, fields: 'sheets.properties' });
+    const sh = meta.data.sheets.find(x => x.properties.title === RCEE_FOGLIO);
+    if (!sh) return res.status(500).json({ ok: false, errore: 'foglio ScadenzeRCEE non trovato' });
+    const sheetId = sh.properties.sheetId;
+
+    const cellaData = (g) => ({ userEnteredValue: { numberValue: rceeSeriale(g) }, userEnteredFormat: { numberFormat: { type: 'DATE', pattern: 'dd/mm/yyyy' } } });
+    const scrivi = (riga, col, cella, campi) => ({ updateCells: {
+      range: { sheetId, startRowIndex: riga, endRowIndex: riga + 1, startColumnIndex: col, endColumnIndex: col + 1 },
+      rows: [{ values: [cella] }], fields: campi } });
+    const richieste = [];
+    let ricalcolate = 0, esito = null;
+    for (const i of righe) {
+      richieste.push(scrivi(i, C.ult, cellaData(giorno), 'userEnteredValue,userEnteredFormat.numberFormat'));
+      const anni = parseFloat((rceeCella(rows[i], C.per) || '').toString().replace(',', '.'));
+      if (!(Number.isInteger(anni) && anni >= 1 && anni <= 10) || C.prox < 0 || C.giorni < 0 || C.stato < 0) continue;
+      const s = rceeScadenza(data, anni, oggi);
+      richieste.push(scrivi(i, C.prox, cellaData(s.fine), 'userEnteredValue,userEnteredFormat.numberFormat'));
+      richieste.push(scrivi(i, C.giorni, { userEnteredValue: { numberValue: s.giorni } }, 'userEnteredValue'));
+      richieste.push(scrivi(i, C.stato, { userEnteredValue: { stringValue: s.stato } }, 'userEnteredValue'));
+      ricalcolate++;
+      if (!esito) esito = { stato: s.stato, giorni: s.giorni, prossimaScadenza: new Date(s.fine * 86400000).toISOString().slice(0, 10) };
+    }
+    await sheets.spreadsheets.batchUpdate({ spreadsheetId: SHEET_ID, requestBody: { requests: richieste } });
+    res.json({ ok: true, righe: righe.length, ricalcolate, celle: righe.map(i => rceeLettera(C.ult) + (i + 1)), ...(esito || {}) });
+  } catch (err) {
+    res.status(500).json({ ok: false, errore: err.message });
+  }
+});
+
 // ============================================================
 //  SCADENZE RCEE — GET /scadenze-rcee
 //  Legge il foglio "ScadenzeRCEE" (colonne individuate dal nome in
@@ -968,32 +1088,14 @@ app.get('/scadenze-rcee', async (req, res) => {
     const sheets = await getSheets();
     const resp = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
-      range: 'ScadenzeRCEE',
+      range: RCEE_FOGLIO,
       valueRenderOption: 'FORMATTED_VALUE',
     });
     const rows = resp.data.values || [];
     if (rows.length < 2) return res.json({ ok: true, scadenze: [] });
 
-    const norm = (s) => (s || '').toString().toLowerCase()
-      .replace(/[àáâ]/g,'a').replace(/[èé]/g,'e').replace(/[ìí]/g,'i')
-      .replace(/[òó]/g,'o').replace(/[ùú]/g,'u').replace(/[^a-z0-9]/g,'');
-    const H = rows[0].map(norm);
-    const find = (pred) => { for (let i=0;i<H.length;i++) if (pred(H[i])) return i; return -1; };
-    const C = {
-      targa:  find(h => h.indexOf('targat') >= 0),
-      imp:    find(h => h === 'codiceimpianto' || (h.indexOf('impianto')>=0 && h.indexOf('codice')>=0 && h.indexOf('potenza')<0)),
-      anag:   find(h => h.indexOf('anagrafica') >= 0),
-      desc:   find(h => h.indexOf('descrizione') >= 0),
-      comm:   find(h => h.indexOf('commessa') >= 0),
-      alim:   find(h => h.indexOf('alimentazione') >= 0),
-      pottot: find(h => h.indexOf('potenza')>=0 && h.indexOf('impianto')>=0),
-      ult:    find(h => h.indexOf('ultimo') >= 0),
-      per:    find(h => h.indexOf('periodic') >= 0),
-      prox:   find(h => h.indexOf('prossima')>=0 || h.indexOf('scadenza')>=0),
-      giorni: find(h => h.indexOf('giorni') >= 0),
-      stato:  find(h => h.indexOf('stato') >= 0),
-    };
-    const g = (r, i) => (i >= 0 && r[i] !== undefined) ? r[i] : '';
+    const C = rceeColonne(rows[0]);
+    const g = rceeCella;
 
     // 19/11/2026: prima si tenevano solo le righe OK / IN SCADENZA / SCADUTO e gli impianti
     // con "MANCA ULT. CONTROLLO" o "ALIMENTAZIONE NON RICONOSCIUTA" (es. le Capitanerie di
